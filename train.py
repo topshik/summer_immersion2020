@@ -87,13 +87,11 @@ def main(args):
     tensor = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.Tensor
     step = 0
     for epoch in range(args.epochs):
-
         for split in splits:
-
             data_loader = DataLoader(
                 dataset=datasets[split],
                 batch_size=args.batch_size,
-                shuffle=split=='train',
+                shuffle=(split == 'train'),
                 num_workers=cpu_count(),
                 pin_memory=torch.cuda.is_available()
             )
