@@ -1,3 +1,5 @@
+from collections import defaultdict
+import os
 from typing import Tuple
 
 import numpy as np
@@ -9,6 +11,7 @@ from torch.utils.data import DataLoader
 import torch.nn.utils.rnn as rnn_utils
 
 from ptb import PTB
+from utils import idx2word
 
 
 def save_sample(save_to: torch.Tensor, sample: torch.Tensor, running_seqs: torch.Tensor, t: int):
@@ -35,7 +38,7 @@ class PLSentenceVAE(pl.LightningModule):
 
         # datasets and their params, are set in prepare_data()
         self.batch_size = 32
-        self.len_train_loader = 0
+        self.len_train_loader, self.len_val_loader = 0, 0
         self.ptb_train, self.ptb_val = None, None
 
         self.new_device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -254,6 +257,7 @@ class PLSentenceVAE(pl.LightningModule):
         """
         val_loader = DataLoader(dataset=self.ptb_val, batch_size=self.batch_size, num_workers=4,
                                 pin_memory=torch.cuda.is_available())
+        self.len_val_loader = len(val_loader)
         return val_loader
 
     def kl_anneal_function(self, anneal_function: str) -> float:
@@ -318,6 +322,48 @@ class PLSentenceVAE(pl.LightningModule):
         logs = {'train_loss': loss}
         # TODO: add full logs to lightning
         return {'loss': loss, 'log': logs}
+
+    def validation_step(self, batch: dict, batch_idx: int) -> dict:
+        """
+        Perform validation step
+        :param batch: dict with keys (input, target, length); contains preprocessed (pad, sos, eos added) input tensor,
+        target tensor and lengths of the sentences
+        :param batch_idx: number of batch in current epoch
+        :return: dict with training logs
+        """
+        batch_size = batch['input'].size(0)
+        for key in batch:
+            batch[key] = batch[key].to(self.new_device)
+
+        tracker = defaultdict(torch.Tensor)
+
+        # Forward pass
+        logp, mean, logv, z = self.forward(batch['input'], batch['length'])
+
+        # loss calculation
+        nll_loss, kl_loss, kl_weight = self.loss_fn(logp, batch['target'], batch['length'], mean, logv, 'logistic')
+        loss = (nll_loss + kl_weight * kl_loss) / batch_size
+
+        tracker['ELBO'] = torch.cat((tracker['ELBO'].to(self.new_device), loss.data.view(1, -1)), dim=0)
+
+        if batch_idx % self.print_every == 0 or batch_idx + 1 == self.len_val_loader:
+            print("VALIDATION Batch %04d/%i, Loss %9.4f, NLL-Loss %9.4f, KL-Loss %9.4f, KL-Weight %6.3f"
+                  % (batch_idx, self.len_val_loader - 1, loss.item(), nll_loss.item() / batch_size,
+                     kl_loss.item() / batch_size, kl_weight))
+
+        if 'target_sentences' not in tracker:
+            tracker['target_sentences'] = []
+        tracker['target_sentences'] += idx2word(batch['target'].data, i2w=self.ptb_train.get_i2w(),
+                                                pad_idx=self.pad_idx)
+        tracker['z'] = torch.cat((tracker['z'].to(self.new_device), z.data), dim=0)
+
+        save_model_path = 'checkpoints'
+        checkpoint_path = os.path.join(save_model_path, "E%i.pytorch" % self.step)
+        torch.save(model.state_dict(), checkpoint_path)
+        print("Model saved at %s" % checkpoint_path)
+
+        # TODO: add full logs to lightning
+        return {'val_loss': loss}
 
     def configure_optimizers(self) -> Optimizer:
         """
