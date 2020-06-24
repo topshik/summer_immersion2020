@@ -1,9 +1,10 @@
-from collections import OrderedDict, defaultdict
+from typing import Tuple
 
 import numpy as np
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
+from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader
 import torch.nn.utils.rnn as rnn_utils
 
@@ -22,32 +23,38 @@ def save_sample(save_to: torch.Tensor, sample: torch.Tensor, running_seqs: torch
 
 
 class PLSentenceVAE(pl.LightningModule):
-    def __init__(self, vocab_size: int, embedding_size: int, sos_idx: int, eos_idx: int, pad_idx: int, unk_idx: int,
-                 max_sequence_length: int, rnn_type: str = 'rnn', latent_size: int = 256, hidden_size: int = 256,
+    def __init__(self, vocab_size: int = 9877, k: int = 0.0025, x0: int = 2500, embedding_size: int = 300,
+                 max_sequence_length: int = 60, rnn_type: str = 'rnn', latent_size: int = 16, hidden_size: int = 256,
                  word_dropout: float = 0, embedding_dropout: float = 0.5, num_layers: int = 1,
-                 bidirectional: bool = False):
+                 bidirectional: bool = False, print_every: int = 50) -> None:
         super().__init__()
-        self.tensor = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.Tensor
-        self.step = 0  # needed for KL annealing
-        self.ptb_train, self.ptb_val = None, None
+        # kl annealing params
+        self.step = 0
+        self.k = k
+        self.x0 = x0
+
+        # datasets and their params, are set in prepare_data()
         self.batch_size = 32
         self.len_train_loader = 0
+        self.ptb_train, self.ptb_val = None, None
 
-        avail = torch.cuda.is_available()
         self.new_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.print_every = print_every
 
+        # tokens info
         self.max_sequence_length = max_sequence_length
-        self.sos_idx = sos_idx
-        self.eos_idx = eos_idx
-        self.pad_idx = pad_idx
-        self.unk_idx = unk_idx
+        self.sos_idx = 0
+        self.eos_idx = 0
+        self.pad_idx = 0
+        self.unk_idx = 0
+        self.vocab_size = vocab_size
 
-        self.latent_size = latent_size
-
+        # net params and architecture
         self.rnn_type = rnn_type
         self.bidirectional = bidirectional
         self.num_layers = num_layers
         self.hidden_size = hidden_size
+        self.latent_size = latent_size
 
         self.embedding = nn.Embedding(vocab_size, embedding_size)
         self.word_dropout_rate = word_dropout
@@ -74,13 +81,23 @@ class PLSentenceVAE(pl.LightningModule):
         self.latent2hidden = nn.Linear(latent_size, hidden_size * self.hidden_factor)
         self.outputs2vocab = nn.Linear(hidden_size * (2 if bidirectional else 1), vocab_size)
 
-    def forward(self, input_sequence, length):
-
+    def forward(self, input_sequence: torch.Tensor, length: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor,
+                                                                                   torch.Tensor, torch.Tensor]:
+        """
+        Perform forward pass for the model
+        :param input_sequence: preprocessed sentences (pad, sos, eos added)
+        :param length: lengths of the sentences
+        :return: tuple of four torch.Tensors:
+            1st - prediction logits
+            2nd - mean of variational posterior
+            3rd - log variance of variational posterior
+            4th - sample from variational posterior
+        """
         batch_size = input_sequence.size(0)
         sorted_lengths, sorted_idx = torch.sort(length, descending=True)
         input_sequence = input_sequence[sorted_idx]
 
-        # ENCODER
+        # encoder
         input_embedding = self.embedding(input_sequence)
         packed_input = rnn_utils.pack_padded_sequence(input_embedding, sorted_lengths.data.tolist(), batch_first=True)
         _, hidden = self.encoder_rnn(packed_input)
@@ -92,7 +109,7 @@ class PLSentenceVAE(pl.LightningModule):
         else:
             hidden = hidden.squeeze()
 
-        # REPARAMETERIZATION
+        # reparametrization
         mean = self.hidden2mean(hidden)
         logv = self.hidden2logv(hidden)
         std = torch.exp(0.5 * logv)
@@ -138,7 +155,13 @@ class PLSentenceVAE(pl.LightningModule):
 
         return logp, mean, logv, z
 
-    def inference(self, n=4, z=None):
+    def inference(self, n: int = 4, z: torch.Tensor = None) -> torch.Tensor:
+        """
+        Create samples either pure or for interpolation
+        :param n: number of the samples to be produced
+        :param z: sample from variational posterior to be used
+        :return: generated sequence
+        """
         if z is None:
             batch_size = n
             z = torch.randn([batch_size, self.latent_size]).to(self.new_device)
@@ -191,124 +214,120 @@ class PLSentenceVAE(pl.LightningModule):
                 running_seqs = torch.arange(0, len(running_seqs), device=self.new_device).long()
             t += 1
 
-        return generations, z
+        return generations
 
     def prepare_data(self) -> None:
-        # defaults from args
+        """
+        Load datasets
+        """
+        # defaults from args, TODO: remove to parameters
         data_dir = 'data'
         create_data = False
         splits = ['train', 'valid']
         max_sequence_length = 60
         min_occ = 1
 
-        datasets = OrderedDict()
+        datasets = {}
         for split in splits:
-            datasets[split] = PTB(
-                data_dir=data_dir,
-                split=split,
-                create_data=create_data,
-                max_sequence_length=max_sequence_length,
-                min_occ=min_occ
-            )
-
+            datasets[split] = PTB(data_dir=data_dir, split=split, create_data=create_data,
+                                  max_sequence_length=max_sequence_length, min_occ=min_occ)
         self.ptb_train, self.ptb_val = datasets['train'], datasets['valid']
+        self.sos_idx = self.ptb_train.sos_idx
+        self.eos_idx = self.ptb_train.eos_idx
+        self.pad_idx = self.ptb_train.pad_idx
+        self.unk_idx = self.ptb_train.unk_idx
 
     def train_dataloader(self) -> DataLoader:
+        """
+        Create train dataloader from train dataset
+        :return: pytorh dataloader
+        """
         train_loader = DataLoader(dataset=self.ptb_train, batch_size=self.batch_size, shuffle=True,
                                   num_workers=4, pin_memory=torch.cuda.is_available())
         self.len_train_loader = len(train_loader)
         return train_loader
 
-    def kl_anneal_function(self, anneal_function, k, x0):
-        if anneal_function == 'logistic':
-            return float(1 / (1 + np.exp(-k * (self.step - x0))))
-        elif anneal_function == 'linear':
-            return min(1, self.step / x0)
+    def val_dataloader(self) -> DataLoader:
+        """
+        Create train dataloader from train dataset
+        :return: pytorh dataloader
+        """
+        val_loader = DataLoader(dataset=self.ptb_val, batch_size=self.batch_size, num_workers=4,
+                                pin_memory=torch.cuda.is_available())
+        return val_loader
 
-    def loss_fn(self, logp, target, length, mean, logv, anneal_function, k, x0):
-        NLL = torch.nn.NLLLoss(ignore_index=self.pad_idx, reduction='sum')
+    def kl_anneal_function(self, anneal_function: str) -> float:
+        """
+        Compute current KL divergence coefficient
+        :param anneal_function:
+        :return: coefficient
+        """
+        if anneal_function == 'logistic':
+            return float(1 / (1 + np.exp(-self.k * (self.step - self.x0))))
+        elif anneal_function == 'linear':
+            return min(1., self.step / self.x0)
+
+    def loss_fn(self, logp: torch.Tensor, target: torch.Tensor, length: torch.Tensor, mean: torch.Tensor,
+                logv: torch.Tensor, anneal_function: str) -> Tuple[torch.Tensor, torch.Tensor, float]:
+        """
+        Compute loss
+        :param logp: prediction logits tensor of shape [batch_size, batch_max_sentence_length, vocab_size]
+        :param target: target tensor of shape [batch_size, max_sentence_length]
+        :param length: sentences lengths tensor of shape [batch_size]
+        :param mean: mean of the variational posterior of shape [batch_size]
+        :param logv: log variance of the variational posterior of shape [batch_size]
+        :param anneal_function: type on the annealing: either linear or logistic
+        :return: tuple of reconstruction loss, KL loss and KL weight
+        """
         # cut-off unnecessary padding from target, and flatten
         target = target[:, :torch.max(length).item()].contiguous().view(-1)
         logp = logp.view(-1, logp.size(2))
-        # Negative Log Likelihood
-        NLL_loss = NLL(logp, target)
-        # KL Divergence
-        KL_loss = -0.5 * torch.sum(1 + logv - mean.pow(2) - logv.exp())
-        KL_weight = self.kl_anneal_function(anneal_function, k, x0)
 
-        return NLL_loss, KL_loss, KL_weight
+        nll = torch.nn.NLLLoss(ignore_index=self.pad_idx, reduction='sum')
+        nll_loss = nll(logp, target)
+        kl_loss = -0.5 * torch.sum(1 + logv - mean.pow(2) - logv.exp())
+        kl_weight = self.kl_anneal_function(anneal_function)
 
-    def training_step(self, batch, batch_idx):
-        # defaults from args
-        k1 = 0.0025
-        x0 = 2500
-        print_every = 50
-        tensor = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.Tensor
-        tracker = defaultdict(tensor)
+        return nll_loss, kl_loss, kl_weight
 
+    def training_step(self, batch: dict, batch_idx: int) -> dict:
+        """
+        Perform trainig step
+        :param batch: dict with keys (input, target, length); contains preprocessed (pad, sos, eos added) input tensor,
+        target tensor and lengths of the sentences
+        :param batch_idx: number of batch in current epoch
+        :return: dict with training logs
+        """
         batch_size = batch['input'].size(0)
-        for k, v in batch.items():
-            if torch.is_tensor(v):
-                batch[k] = v.to(self.new_device)
+        for key in batch:
+            batch[key] = batch[key].to(self.new_device)
 
         # Forward pass
         logp, mean, logv, z = self.forward(batch['input'], batch['length'])
 
         # loss calculation
-        NLL_loss, KL_loss, KL_weight = self.loss_fn(logp, batch['target'], batch['length'], mean, logv, 'logistic',
-                                                    k1, x0)
-        loss = (NLL_loss + KL_weight * KL_loss) / batch_size
+        nll_loss, kl_loss, kl_weight = self.loss_fn(logp, batch['target'], batch['length'], mean, logv, 'logistic')
+        loss = (nll_loss + kl_weight * kl_loss) / batch_size
         self.step += 1
 
-        # bookkeepeing
-        tracker['ELBO'] = torch.cat((tracker['ELBO'], loss.data.view(1, -1)), dim=0)
-
-        # if batch_idx % print_every == 0 or batch_idx + 1 == len(data_loader):
-        #     print("%s Batch %04d/%i, Loss %9.4f, NLL-Loss %9.4f, KL-Loss %9.4f, KL-Weight %6.3f"
-        #           % (split.upper(), batch_idx, len(data_loader) - 1, loss.item(), NLL_loss.item() / batch_size,
-        #              KL_loss.item() / batch_size, KL_weight))
-
-        if batch_idx % print_every == 0 or batch_idx + 1 == self.len_train_loader:
+        if batch_idx % self.print_every == 0 or batch_idx + 1 == self.len_train_loader:
             print("TRAIN Batch %04d/%i, Loss %9.4f, NLL-Loss %9.4f, KL-Loss %9.4f, KL-Weight %6.3f"
-                  % (batch_idx, self.len_train_loader - 1, loss.item(), NLL_loss.item() / batch_size,
-                     KL_loss.item() / batch_size, KL_weight))
+                  % (batch_idx, self.len_train_loader - 1, loss.item(), nll_loss.item() / batch_size,
+                     kl_loss.item() / batch_size, kl_weight))
 
         logs = {'train_loss': loss}
+        # TODO: add full logs to lightning
         return {'loss': loss, 'log': logs}
 
-    def configure_optimizers(self):
+    def configure_optimizers(self) -> Optimizer:
+        """
+        Configure optimizer for training
+        :return: optimizer
+        """
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
         return optimizer
 
 
-splits = ['train', 'valid']
-datasets = OrderedDict()
-for split in splits:
-    datasets[split] = PTB(
-        data_dir='data',
-        split=split,
-        create_data=False,
-        max_sequence_length=60,
-        min_occ=1
-    )
-
-model = PLSentenceVAE(
-    vocab_size=datasets['train'].vocab_size,
-    sos_idx=datasets['train'].sos_idx,
-    eos_idx=datasets['train'].eos_idx,
-    pad_idx=datasets['train'].pad_idx,
-    unk_idx=datasets['train'].unk_idx,
-    max_sequence_length=60,
-    embedding_size=300,
-    rnn_type='rnn',
-    hidden_size=256,
-    word_dropout=0,
-    embedding_dropout=0.5,
-    latent_size=16,
-    num_layers=1,
-    bidirectional=False
-    )
-
-model.cuda()
-trainer = pl.Trainer(max_epochs=10)
+model = PLSentenceVAE().cuda()
+trainer = pl.Trainer(max_epochs=8, auto_select_gpus=True)
 trainer.fit(model)

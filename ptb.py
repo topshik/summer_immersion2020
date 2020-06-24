@@ -1,18 +1,17 @@
-import os
+from collections import defaultdict
 import io
 import json
-import torch
-import numpy as np
-from collections import defaultdict
-from torch.utils.data import Dataset
+import os
+
 from nltk.tokenize import TweetTokenizer
+import numpy as np
+from torch.utils.data import Dataset
 
 from utils import OrderedCounter
 
+
 class PTB(Dataset):
-
     def __init__(self, data_dir, split, create_data, **kwargs):
-
         super().__init__()
         self.data_dir = data_dir
         self.split = split
@@ -24,16 +23,16 @@ class PTB(Dataset):
         self.vocab_file = 'ptb.vocab.json'
 
         if create_data:
-            print("Creating new %s ptb data."%split.upper())
+            print("Creating new %s ptb data." % split.upper())
             self._create_data()
 
         elif not os.path.exists(os.path.join(self.data_dir, self.data_file)):
-            print("%s preprocessed file not found at %s. Creating new."%(split.upper(), os.path.join(self.data_dir, self.data_file)))
+            print("%s preprocessed file not found at %s. Creating new." % (split.upper(), os.path.join(self.data_dir,
+                                                                                                       self.data_file)))
             self._create_data()
 
         else:
             self._load_data()
-
 
     def __len__(self):
         return len(self.data)
@@ -73,9 +72,7 @@ class PTB(Dataset):
     def get_i2w(self):
         return self.i2w
 
-
     def _load_data(self, vocab=True):
-
         with open(os.path.join(self.data_dir, self.data_file), 'r') as file:
             self.data = json.load(file)
         if vocab:
@@ -100,9 +97,7 @@ class PTB(Dataset):
 
         data = defaultdict(dict)
         with open(self.raw_data_path, 'r') as file:
-
             for i, line in enumerate(file):
-
                 words = tokenizer.tokenize(line)
 
                 input = ['<sos>'] + words
@@ -132,9 +127,7 @@ class PTB(Dataset):
         self._load_data(vocab=False)
 
     def _create_vocab(self):
-
-        assert self.split == 'train', "Vocablurary can only be created for training file."
-
+        assert self.split == 'train', "Vocabulary can only be created for training file."
         tokenizer = TweetTokenizer(preserve_case=False)
 
         w2c = OrderedCounter()
@@ -159,7 +152,7 @@ class PTB(Dataset):
 
         assert len(w2i) == len(i2w)
 
-        print("Vocablurary of %i keys created." %len(w2i))
+        print("Vocabulary of %i keys created." % len(w2i))
 
         vocab = dict(w2i=w2i, i2w=i2w)
         with io.open(os.path.join(self.data_dir, self.vocab_file), 'wb') as vocab_file:
