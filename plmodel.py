@@ -1,4 +1,5 @@
 from collections import defaultdict
+import json
 import os
 from typing import Tuple
 
@@ -11,7 +12,7 @@ from torch.utils.data import DataLoader
 import torch.nn.utils.rnn as rnn_utils
 
 from ptb import PTB
-from utils import idx2word
+from utils import idx2word, interpolate
 
 
 def save_sample(save_to: torch.Tensor, sample: torch.Tensor, running_seqs: torch.Tensor, t: int):
@@ -27,7 +28,7 @@ def save_sample(save_to: torch.Tensor, sample: torch.Tensor, running_seqs: torch
 
 class PLSentenceVAE(pl.LightningModule):
     def __init__(self, vocab_size: int = 9877, k: int = 0.0025, x0: int = 2500, embedding_size: int = 300,
-                 max_sequence_length: int = 60, rnn_type: str = 'rnn', latent_size: int = 16, hidden_size: int = 256,
+                 max_sequence_length: int = 60, rnn_type: str = 'rnn', latent_size: int = 256, hidden_size: int = 256,
                  word_dropout: float = 0, embedding_dropout: float = 0.5, num_layers: int = 1,
                  bidirectional: bool = False, print_every: int = 50) -> None:
         super().__init__()
@@ -37,11 +38,10 @@ class PLSentenceVAE(pl.LightningModule):
         self.x0 = x0
 
         # datasets and their params, are set in prepare_data()
-        self.batch_size = 32
+        self.batch_size = 256
         self.len_train_loader, self.len_val_loader = 0, 0
         self.ptb_train, self.ptb_val = None, None
 
-        self.new_device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.print_every = print_every
 
         # tokens info
@@ -117,7 +117,8 @@ class PLSentenceVAE(pl.LightningModule):
         logv = self.hidden2logv(hidden)
         std = torch.exp(0.5 * logv)
 
-        z = torch.randn([batch_size, self.latent_size]).to(self.new_device)
+        # z = torch.randn([batch_size, self.latent_size]).to(self.new_device)
+        z = torch.randn([batch_size, self.latent_size]).to(self.device)
         z = z * std + mean
 
         # DECODER
@@ -132,9 +133,7 @@ class PLSentenceVAE(pl.LightningModule):
         # decoder input
         if self.word_dropout_rate > 0:
             # randomly replace decoder input with <unk>
-            prob = torch.rand(input_sequence.size())
-            if torch.cuda.is_available():
-                prob = prob.cuda()
+            prob = torch.rand(input_sequence.size()).to(self.device)
             prob[(input_sequence.data - self.sos_idx) * (input_sequence.data - self.pad_idx) == 0] = 1
             decoder_input_sequence = input_sequence.clone()
             decoder_input_sequence[prob < self.word_dropout_rate] = self.unk_idx
@@ -167,7 +166,7 @@ class PLSentenceVAE(pl.LightningModule):
         """
         if z is None:
             batch_size = n
-            z = torch.randn([batch_size, self.latent_size]).to(self.new_device)
+            z = torch.randn([batch_size, self.latent_size]).to(self.device)
         else:
             batch_size = z.size(0)
 
@@ -180,17 +179,17 @@ class PLSentenceVAE(pl.LightningModule):
         hidden = hidden.unsqueeze(0)
 
         # required for dynamic stopping of sentence generation
-        sequence_idx = torch.arange(0, batch_size, device=self.new_device).long()  # all idx of batch
+        sequence_idx = torch.arange(0, batch_size, device=self.device).long()  # all idx of batch
         # all idx of batch which are still generating
-        sequence_running = torch.arange(0, batch_size, device=self.new_device).long()
-        sequence_mask = torch.ones(batch_size, device=self.new_device).bool()
+        sequence_running = torch.arange(0, batch_size, device=self.device).long()
+        sequence_mask = torch.ones(batch_size, device=self.device).bool()
         # idx of still generating sequences with respect to current loop
-        running_seqs = torch.arange(0, batch_size, device=self.new_device).long()
+        running_seqs = torch.arange(0, batch_size, device=self.device).long()
         # generated_sequenced
-        generations = torch.empty((batch_size, self.max_sequence_length), device=self.new_device).fill_(self.pad_idx).long()
+        generations = torch.empty((batch_size, self.max_sequence_length), device=self.device).fill_(self.pad_idx).long()
 
         t = 0
-        input_sequence = torch.empty(batch_size, device=self.new_device).fill_(self.sos_idx).long()
+        input_sequence = torch.empty(batch_size, device=self.device).fill_(self.sos_idx).long()
         while t < self.max_sequence_length and len(running_seqs) > 0:
             input_sequence = input_sequence.unsqueeze(1)
             input_embedding = self.embedding(input_sequence)
@@ -204,17 +203,17 @@ class PLSentenceVAE(pl.LightningModule):
             # update global running sequence
             sequence_mask[sequence_running] = (input_sequence != self.eos_idx)
             sequence_running = sequence_idx.masked_select(sequence_mask)
-            print('kek', sequence_running)
+            # print('kek', sequence_running)
             # update local running sequences
             running_mask = (input_sequence != self.eos_idx).data
             running_seqs = running_seqs.masked_select(running_mask)
-            print('lol', running_seqs)
+            # print('lol', running_seqs)
 
             # prune input and hidden state according to local update
             if len(running_seqs) > 0:
                 input_sequence = input_sequence[running_seqs]
                 hidden = hidden[:, running_seqs]
-                running_seqs = torch.arange(0, len(running_seqs), device=self.new_device).long()
+                running_seqs = torch.arange(0, len(running_seqs), device=self.device).long()
             t += 1
 
         return generations
@@ -304,7 +303,7 @@ class PLSentenceVAE(pl.LightningModule):
         """
         batch_size = batch['input'].size(0)
         for key in batch:
-            batch[key] = batch[key].to(self.new_device)
+            batch[key] = batch[key].to(self.device)
 
         # Forward pass
         logp, mean, logv, z = self.forward(batch['input'], batch['length'])
@@ -333,7 +332,7 @@ class PLSentenceVAE(pl.LightningModule):
         """
         batch_size = batch['input'].size(0)
         for key in batch:
-            batch[key] = batch[key].to(self.new_device)
+            batch[key] = batch[key].to(self.device)
 
         tracker = defaultdict(torch.Tensor)
 
@@ -344,26 +343,21 @@ class PLSentenceVAE(pl.LightningModule):
         nll_loss, kl_loss, kl_weight = self.loss_fn(logp, batch['target'], batch['length'], mean, logv, 'logistic')
         loss = (nll_loss + kl_weight * kl_loss) / batch_size
 
-        tracker['ELBO'] = torch.cat((tracker['ELBO'].to(self.new_device), loss.data.view(1, -1)), dim=0)
+        # TODO: add full logs to lightning
+        return {'ELBO': loss.data, 'NLL loss': nll_loss.data, 'KL loss': kl_loss.data, 'KL weight': kl_weight}
 
-        if batch_idx % self.print_every == 0 or batch_idx + 1 == self.len_val_loader:
-            print("VALIDATION Batch %04d/%i, Loss %9.4f, NLL-Loss %9.4f, KL-Loss %9.4f, KL-Weight %6.3f"
-                  % (batch_idx, self.len_val_loader - 1, loss.item(), nll_loss.item() / batch_size,
-                     kl_loss.item() / batch_size, kl_weight))
-
-        if 'target_sentences' not in tracker:
-            tracker['target_sentences'] = []
-        tracker['target_sentences'] += idx2word(batch['target'].data, i2w=self.ptb_train.get_i2w(),
-                                                pad_idx=self.pad_idx)
-        tracker['z'] = torch.cat((tracker['z'].to(self.new_device), z.data), dim=0)
-
+    def validation_epoch_end(self, outputs):
+        # TODO lightning saving interface
         save_model_path = 'checkpoints'
         checkpoint_path = os.path.join(save_model_path, "E%i.pytorch" % self.step)
         torch.save(model.state_dict(), checkpoint_path)
-        print("Model saved at %s" % checkpoint_path)
+        print("\nModel saved at %s" % checkpoint_path)
 
-        # TODO: add full logs to lightning
-        return {'val_loss': loss}
+        avg_elbo = torch.stack([x['ELBO'] for x in outputs]).mean()
+        avg_nll = torch.stack([x['NLL loss'] for x in outputs]).mean()
+        avg_kl = torch.stack([x['KL loss'] for x in outputs]).mean()
+        tensorboard_logs = {'ELBO': avg_elbo, 'NLL loss': avg_nll, 'KL loss': avg_kl}
+        return {'ELBO': avg_elbo, 'NLL loss': avg_nll, 'KL loss': avg_kl, 'log': tensorboard_logs}
 
     def configure_optimizers(self) -> Optimizer:
         """
@@ -374,6 +368,33 @@ class PLSentenceVAE(pl.LightningModule):
         return optimizer
 
 
-model = PLSentenceVAE().cuda()
-trainer = pl.Trainer(max_epochs=8, auto_select_gpus=True)
+# training
+model = PLSentenceVAE()
+trainer = pl.Trainer(max_epochs=8, gpus=1, auto_select_gpus=True)
 trainer.fit(model)
+print('Training ended\n')
+
+# inference
+# path = 'checkpoints/E10520.pytorch'
+# model = PLSentenceVAE().cuda()
+# model.load_state_dict(torch.load(path))
+model.eval()
+# print("Model loaded from %s" % path)
+
+with open('data/ptb.vocab.json', 'r') as file:
+    vocab = json.load(file)
+
+w2i, i2w = vocab['w2i'], vocab['i2w']
+
+n_samples = 10
+samples = model.inference(n=n_samples)
+print('----------SAMPLES----------')
+print(*idx2word(samples, i2w=i2w, pad_idx=w2i['<pad>']), sep='\n')
+
+latent_size = 256
+z1 = torch.randn([latent_size]).numpy()
+z2 = torch.randn([latent_size]).numpy()
+z = torch.from_numpy(interpolate(start=z1, end=z2, steps=8)).float().cuda()
+samples = model.inference(z=z)
+print('-------INTERPOLATION-------')
+print(*idx2word(samples, i2w=i2w, pad_idx=w2i['<pad>']), sep='\n')
