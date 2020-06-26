@@ -1,4 +1,3 @@
-from collections import defaultdict
 import json
 import os
 from typing import Tuple
@@ -27,7 +26,7 @@ def save_sample(save_to: torch.Tensor, sample: torch.Tensor, running_seqs: torch
 
 
 class PLSentenceVAE(pl.LightningModule):
-    def __init__(self, vocab_size: int = 9877, k: int = 0.0025, x0: int = 2500, embedding_size: int = 300,
+    def __init__(self, batch_size: int = 256, vocab_size: int = 9877, k: int = 0.0025, x0: int = 2500, embedding_size: int = 300,
                  max_sequence_length: int = 60, rnn_type: str = 'gru', latent_size: int = 32, hidden_size: int = 256,
                  word_dropout: float = 0, embedding_dropout: float = 0.5, num_layers: int = 1,
                  bidirectional: bool = False, print_every: int = 50) -> None:
@@ -38,7 +37,7 @@ class PLSentenceVAE(pl.LightningModule):
         self.x0 = x0
 
         # datasets and their params, are set in prepare_data()
-        self.batch_size = 256
+        self.batch_size = batch_size
         self.len_train_loader, self.len_val_loader = 0, 0
         self.ptb_train, self.ptb_val = None, None
 
@@ -67,8 +66,8 @@ class PLSentenceVAE(pl.LightningModule):
             rnn = nn.RNN
         elif rnn_type == 'gru':
             rnn = nn.GRU
-        # elif rnn_type == 'lstm':
-        #     rnn = nn.LSTM
+        elif rnn_type == 'lstm':
+            rnn = nn.LSTM
         else:
             raise ValueError()
 
@@ -105,6 +104,11 @@ class PLSentenceVAE(pl.LightningModule):
         packed_input = rnn_utils.pack_padded_sequence(input_embedding, sorted_lengths.data.tolist(), batch_first=True)
         _, hidden = self.encoder_rnn(packed_input)
 
+        if self.rnn_type == 'lstm':
+            hidden = hidden[0]
+
+        print(hidden.shape)
+
         if self.bidirectional or self.num_layers > 1:
             # flatten hidden state
             # possibly incorrect, maybe need to permute
@@ -117,7 +121,6 @@ class PLSentenceVAE(pl.LightningModule):
         logv = self.hidden2logv(hidden)
         std = torch.exp(0.5 * logv)
 
-        # z = torch.randn([batch_size, self.latent_size]).to(self.new_device)
         z = torch.randn([batch_size, self.latent_size]).to(self.device)
         z = z * std + mean
 
@@ -141,6 +144,7 @@ class PLSentenceVAE(pl.LightningModule):
         input_embedding = self.embedding_dropout(input_embedding)
         packed_input = rnn_utils.pack_padded_sequence(input_embedding, sorted_lengths.data.tolist(), batch_first=True)
 
+        # FIXME lstm rnn type breaks here
         # decoder forward pass
         outputs, _ = self.decoder_rnn(packed_input, hidden)
 
@@ -303,10 +307,6 @@ class PLSentenceVAE(pl.LightningModule):
         :param batch_idx: number of batch in current epoch
         :return: dict with training logs
         """
-        # batch_size = batch['input'].size(0)
-        # for key in batch:
-        #     batch[key] = batch[key].to(self.device)
-
         # Forward pass
         logp, mean, logv, z = self.forward(batch['input'], batch['length'])
 
@@ -315,13 +315,7 @@ class PLSentenceVAE(pl.LightningModule):
         loss = (nll_loss + kl_weight * kl_loss) / self.batch_size
         self.step += 1
 
-        # if batch_idx % self.print_every == 0 or batch_idx + 1 == self.len_train_loader:
-        #     print("TRAIN Batch %04d/%i, Loss %9.4f, NLL-Loss %9.4f, KL-Loss %9.4f, KL-Weight %6.3f"
-        #           % (batch_idx, self.len_train_loader - 1, loss.item(), nll_loss.item() / self.batch_size,
-        #              kl_loss.item() / self.batch_size, kl_weight))
-
         return {'loss': loss, 'NLL loss': nll_loss.data, 'KL loss': kl_loss.data, 'KL weight': kl_weight}
-        # return {'loss': loss, 'log': logs}
 
     def validation_step(self, batch: dict, batch_idx: int) -> dict:
         """
@@ -386,9 +380,8 @@ samples = model.inference(n=n_samples)
 print('----------SAMPLES----------')
 print(*idx2word(samples, i2w=i2w, pad_idx=w2i['<pad>']), sep='\n')
 
-latent_size = 32
-z1 = torch.randn([latent_size]).numpy()
-z2 = torch.randn([latent_size]).numpy()
+z1 = torch.randn([model.latent_size]).numpy()
+z2 = torch.randn([model.latent_size]).numpy()
 z = torch.from_numpy(interpolate(start=z1, end=z2, steps=8)).float().cuda()
 samples = model.inference(z=z)
 print('-------INTERPOLATION-------')
