@@ -14,17 +14,6 @@ from ptb import PTB
 from utils import idx2word, interpolate
 
 
-def save_sample(save_to: torch.Tensor, sample: torch.Tensor, running_seqs: torch.Tensor, t: int):
-    # select only still running
-    running_latest = save_to[running_seqs]
-    # update token at position t
-    running_latest[:, t] = sample.data
-    # save back
-    save_to[running_seqs] = running_latest
-
-    return save_to
-
-
 class PLSentenceVAE(pl.LightningModule):
     def __init__(self, batch_size: int = 256, vocab_size: int = 9877, k: int = 0.0025, x0: int = 2500, embedding_size: int = 300,
                  max_sequence_length: int = 60, rnn_type: str = 'gru', latent_size: int = 32, hidden_size: int = 256,
@@ -107,8 +96,6 @@ class PLSentenceVAE(pl.LightningModule):
         if self.rnn_type == 'lstm':
             hidden = hidden[0]
 
-        print(hidden.shape)
-
         if self.bidirectional or self.num_layers > 1:
             # flatten hidden state
             # possibly incorrect, maybe need to permute
@@ -182,11 +169,6 @@ class PLSentenceVAE(pl.LightningModule):
 
         hidden = hidden.unsqueeze(0)
 
-        # required for dynamic stopping of sentence generation
-        sequence_idx = torch.arange(0, batch_size, device=self.device).long()  # all idx of batch
-        # all idx of batch which are still generating
-        sequence_running = torch.arange(0, batch_size, device=self.device).long()
-        sequence_mask = torch.ones(batch_size, device=self.device).bool()
         # idx of still generating sequences with respect to current loop
         running_seqs = torch.arange(0, batch_size, device=self.device).long()
         # generated_sequenced
@@ -201,20 +183,19 @@ class PLSentenceVAE(pl.LightningModule):
             logits = self.outputs2vocab(output)
             # sample
             _, input_sequence = torch.topk(logits, 1, dim=-1)
-            input_sequence = input_sequence.squeeze()
-            # save next input
-            generations = save_sample(generations, input_sequence, sequence_running, t)
-            # update global running sequence
-            sequence_mask[sequence_running] = (input_sequence != self.eos_idx)
-            sequence_running = sequence_idx.masked_select(sequence_mask)
-            # print('kek', sequence_running)
+            input_sequence = input_sequence.squeeze(-1)
+            input_sequence = input_sequence.squeeze(-1)
+
+            # select only still running sequences
+            running_latest = generations[running_seqs]
+            # update token at position t
+            running_latest[:, t] = input_sequence.data
+            # save back
+            generations[running_seqs] = running_latest
+
             # update local running sequences
             running_mask = (input_sequence != self.eos_idx).data
             running_seqs = running_seqs.masked_select(running_mask)
-            # print('lol', running_seqs)
-
-            if input_sequence.shape == torch.Size([]):
-                return generations
 
             # prune input and hidden state according to local update
             if len(running_seqs) > 0:
@@ -357,16 +338,16 @@ class PLSentenceVAE(pl.LightningModule):
 
 
 # training
-model = PLSentenceVAE()
-trainer = pl.Trainer(max_epochs=8, gpus=1, auto_select_gpus=True)
-trainer.fit(model)
-print('Training ended\n')
+# model = PLSentenceVAE()
+# trainer = pl.Trainer(max_epochs=8, gpus=1, auto_select_gpus=True)
+# trainer.fit(model)
+# print('Training ended\n')
 
 # inference
-# path = 'checkpoints/E1320.pth'
-# model = PLSentenceVAE()
-# model.load_state_dict(torch.load(path))
-# model.cuda()
+path = 'checkpoints/E1320.pth'
+model = PLSentenceVAE()
+model.load_state_dict(torch.load(path))
+model.cuda()
 model.eval()
 # print("Model loaded from %s" % path)
 
