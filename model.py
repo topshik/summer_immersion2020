@@ -169,13 +169,15 @@ class SentenceVAE(nn.Module):
             # update global running sequence
             sequence_mask[sequence_running] = (input_sequence != self.eos_idx)
             sequence_running = sequence_idx.masked_select(sequence_mask)
-            print('kek', sequence_running)
+            # print('kek', sequence_running)
             # update local running sequences
             running_mask = (input_sequence != self.eos_idx).data
             running_seqs = running_seqs.masked_select(running_mask)
-            print('lol', running_seqs)
+            # print('lol', running_seqs)
 
             # prune input and hidden state according to local update
+            if input_sequence.shape == torch.Size([]):
+                return generations, z
             if len(running_seqs) > 0:
                 input_sequence = input_sequence[running_seqs]
                 hidden = hidden[:, running_seqs]

@@ -28,7 +28,7 @@ def save_sample(save_to: torch.Tensor, sample: torch.Tensor, running_seqs: torch
 
 class PLSentenceVAE(pl.LightningModule):
     def __init__(self, vocab_size: int = 9877, k: int = 0.0025, x0: int = 2500, embedding_size: int = 300,
-                 max_sequence_length: int = 60, rnn_type: str = 'rnn', latent_size: int = 256, hidden_size: int = 256,
+                 max_sequence_length: int = 60, rnn_type: str = 'gru', latent_size: int = 32, hidden_size: int = 256,
                  word_dropout: float = 0, embedding_dropout: float = 0.5, num_layers: int = 1,
                  bidirectional: bool = False, print_every: int = 50) -> None:
         super().__init__()
@@ -191,7 +191,7 @@ class PLSentenceVAE(pl.LightningModule):
         t = 0
         input_sequence = torch.empty(batch_size, device=self.device).fill_(self.sos_idx).long()
         while t < self.max_sequence_length and len(running_seqs) > 0:
-            input_sequence = input_sequence.unsqueeze(1)
+            input_sequence.unsqueeze_(1)
             input_embedding = self.embedding(input_sequence)
             output, hidden = self.decoder_rnn(input_embedding, hidden)
             logits = self.outputs2vocab(output)
@@ -208,6 +208,9 @@ class PLSentenceVAE(pl.LightningModule):
             running_mask = (input_sequence != self.eos_idx).data
             running_seqs = running_seqs.masked_select(running_mask)
             # print('lol', running_seqs)
+
+            if input_sequence.shape == torch.Size([]):
+                return generations
 
             # prune input and hidden state according to local update
             if len(running_seqs) > 0:
@@ -226,13 +229,12 @@ class PLSentenceVAE(pl.LightningModule):
         data_dir = 'data'
         create_data = False
         splits = ['train', 'valid']
-        max_sequence_length = 60
         min_occ = 1
 
         datasets = {}
         for split in splits:
             datasets[split] = PTB(data_dir=data_dir, split=split, create_data=create_data,
-                                  max_sequence_length=max_sequence_length, min_occ=min_occ)
+                                  max_sequence_length=self.max_sequence_length, min_occ=min_occ)
         self.ptb_train, self.ptb_val = datasets['train'], datasets['valid']
         self.sos_idx = self.ptb_train.sos_idx
         self.eos_idx = self.ptb_train.eos_idx
@@ -301,26 +303,25 @@ class PLSentenceVAE(pl.LightningModule):
         :param batch_idx: number of batch in current epoch
         :return: dict with training logs
         """
-        batch_size = batch['input'].size(0)
-        for key in batch:
-            batch[key] = batch[key].to(self.device)
+        # batch_size = batch['input'].size(0)
+        # for key in batch:
+        #     batch[key] = batch[key].to(self.device)
 
         # Forward pass
         logp, mean, logv, z = self.forward(batch['input'], batch['length'])
 
         # loss calculation
         nll_loss, kl_loss, kl_weight = self.loss_fn(logp, batch['target'], batch['length'], mean, logv, 'logistic')
-        loss = (nll_loss + kl_weight * kl_loss) / batch_size
+        loss = (nll_loss + kl_weight * kl_loss) / self.batch_size
         self.step += 1
 
-        if batch_idx % self.print_every == 0 or batch_idx + 1 == self.len_train_loader:
-            print("TRAIN Batch %04d/%i, Loss %9.4f, NLL-Loss %9.4f, KL-Loss %9.4f, KL-Weight %6.3f"
-                  % (batch_idx, self.len_train_loader - 1, loss.item(), nll_loss.item() / batch_size,
-                     kl_loss.item() / batch_size, kl_weight))
+        # if batch_idx % self.print_every == 0 or batch_idx + 1 == self.len_train_loader:
+        #     print("TRAIN Batch %04d/%i, Loss %9.4f, NLL-Loss %9.4f, KL-Loss %9.4f, KL-Weight %6.3f"
+        #           % (batch_idx, self.len_train_loader - 1, loss.item(), nll_loss.item() / self.batch_size,
+        #              kl_loss.item() / self.batch_size, kl_weight))
 
-        logs = {'train_loss': loss}
-        # TODO: add full logs to lightning
-        return {'loss': loss, 'log': logs}
+        return {'loss': loss, 'NLL loss': nll_loss.data, 'KL loss': kl_loss.data, 'KL weight': kl_weight}
+        # return {'loss': loss, 'log': logs}
 
     def validation_step(self, batch: dict, batch_idx: int) -> dict:
         """
@@ -330,26 +331,19 @@ class PLSentenceVAE(pl.LightningModule):
         :param batch_idx: number of batch in current epoch
         :return: dict with training logs
         """
-        batch_size = batch['input'].size(0)
-        for key in batch:
-            batch[key] = batch[key].to(self.device)
-
-        tracker = defaultdict(torch.Tensor)
-
         # Forward pass
         logp, mean, logv, z = self.forward(batch['input'], batch['length'])
 
         # loss calculation
         nll_loss, kl_loss, kl_weight = self.loss_fn(logp, batch['target'], batch['length'], mean, logv, 'logistic')
-        loss = (nll_loss + kl_weight * kl_loss) / batch_size
+        loss = (nll_loss + kl_weight * kl_loss) / self.batch_size
 
-        # TODO: add full logs to lightning
         return {'ELBO': loss.data, 'NLL loss': nll_loss.data, 'KL loss': kl_loss.data, 'KL weight': kl_weight}
 
     def validation_epoch_end(self, outputs):
         # TODO lightning saving interface
         save_model_path = 'checkpoints'
-        checkpoint_path = os.path.join(save_model_path, "E%i.pytorch" % self.step)
+        checkpoint_path = os.path.join(save_model_path, "E%i.pth" % self.step)
         torch.save(model.state_dict(), checkpoint_path)
         print("\nModel saved at %s" % checkpoint_path)
 
@@ -357,7 +351,7 @@ class PLSentenceVAE(pl.LightningModule):
         avg_nll = torch.stack([x['NLL loss'] for x in outputs]).mean()
         avg_kl = torch.stack([x['KL loss'] for x in outputs]).mean()
         tensorboard_logs = {'ELBO': avg_elbo, 'NLL loss': avg_nll, 'KL loss': avg_kl}
-        return {'ELBO': avg_elbo, 'NLL loss': avg_nll, 'KL loss': avg_kl, 'log': tensorboard_logs}
+        return {'val_loss': avg_elbo, 'NLL loss': avg_nll, 'KL loss': avg_kl, 'log': tensorboard_logs}
 
     def configure_optimizers(self) -> Optimizer:
         """
@@ -375,9 +369,10 @@ trainer.fit(model)
 print('Training ended\n')
 
 # inference
-# path = 'checkpoints/E10520.pytorch'
-# model = PLSentenceVAE().cuda()
+# path = 'checkpoints/E1320.pth'
+# model = PLSentenceVAE()
 # model.load_state_dict(torch.load(path))
+# model.cuda()
 model.eval()
 # print("Model loaded from %s" % path)
 
@@ -391,7 +386,7 @@ samples = model.inference(n=n_samples)
 print('----------SAMPLES----------')
 print(*idx2word(samples, i2w=i2w, pad_idx=w2i['<pad>']), sep='\n')
 
-latent_size = 256
+latent_size = 32
 z1 = torch.randn([latent_size]).numpy()
 z2 = torch.randn([latent_size]).numpy()
 z = torch.from_numpy(interpolate(start=z1, end=z2, steps=8)).float().cuda()
