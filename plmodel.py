@@ -15,9 +15,9 @@ from utils import idx2word, interpolate
 
 
 class PLSentenceVAE(pl.LightningModule):
-    def __init__(self, batch_size: int = 256, vocab_size: int = 9877, k: int = 0.0025, x0: int = 2500, embedding_size: int = 300,
-                 max_sequence_length: int = 60, rnn_type: str = 'gru', latent_size: int = 32, hidden_size: int = 256,
-                 word_dropout: float = 0, embedding_dropout: float = 0.5, num_layers: int = 1,
+    def __init__(self, batch_size: int = 256, vocab_size: int = 9877, k: int = 0.0025, x0: int = 2500,
+                 embedding_size: int = 300, max_sequence_length: int = 50, rnn_type: str = 'gru', latent_size: int = 96,
+                 hidden_size: int = 256, word_dropout: float = 0, embedding_dropout: float = 0.5, num_layers: int = 1,
                  bidirectional: bool = False, print_every: int = 50) -> None:
         super().__init__()
         # kl annealing params
@@ -84,7 +84,6 @@ class PLSentenceVAE(pl.LightningModule):
             3rd - log variance of variational posterior
             4th - sample from variational posterior
         """
-        batch_size = input_sequence.size(0)
         sorted_lengths, sorted_idx = torch.sort(length, descending=True)
         input_sequence = input_sequence[sorted_idx]
 
@@ -99,7 +98,7 @@ class PLSentenceVAE(pl.LightningModule):
         if self.bidirectional or self.num_layers > 1:
             # flatten hidden state
             # possibly incorrect, maybe need to permute
-            hidden = hidden.view(batch_size, self.hidden_size * self.hidden_factor)
+            hidden = hidden.view(self.batch_size, self.hidden_size * self.hidden_factor)
         else:
             hidden = hidden.squeeze()
 
@@ -108,7 +107,7 @@ class PLSentenceVAE(pl.LightningModule):
         logv = self.hidden2logv(hidden)
         std = torch.exp(0.5 * logv)
 
-        z = torch.randn([batch_size, self.latent_size]).to(self.device)
+        z = torch.randn([self.batch_size, self.latent_size]).to(self.device)
         z = z * std + mean
 
         # DECODER
@@ -116,7 +115,7 @@ class PLSentenceVAE(pl.LightningModule):
 
         if self.bidirectional or self.num_layers > 1:
             # unflatten hidden state
-            hidden = hidden.view(self.hidden_factor, batch_size, self.hidden_size)
+            hidden = hidden.view(self.hidden_factor, self.batch_size, self.hidden_size)
         else:
             hidden = hidden.unsqueeze(0)
 
@@ -128,6 +127,7 @@ class PLSentenceVAE(pl.LightningModule):
             decoder_input_sequence = input_sequence.clone()
             decoder_input_sequence[prob < self.word_dropout_rate] = self.unk_idx
             input_embedding = self.embedding(decoder_input_sequence)
+
         input_embedding = self.embedding_dropout(input_embedding)
         packed_input = rnn_utils.pack_padded_sequence(input_embedding, sorted_lengths.data.tolist(), batch_first=True)
 
@@ -174,23 +174,22 @@ class PLSentenceVAE(pl.LightningModule):
         # generated_sequenced
         generations = torch.empty((batch_size, self.max_sequence_length), device=self.device).fill_(self.pad_idx).long()
 
-        t = 0
         input_sequence = torch.empty(batch_size, device=self.device).fill_(self.sos_idx).long()
-        while t < self.max_sequence_length and len(running_seqs) > 0:
+        for t in range(self.max_sequence_length):
             input_sequence.unsqueeze_(1)
             input_embedding = self.embedding(input_sequence)
             output, hidden = self.decoder_rnn(input_embedding, hidden)
             logits = self.outputs2vocab(output)
+
             # sample
             _, input_sequence = torch.topk(logits, 1, dim=-1)
             input_sequence = input_sequence.squeeze(-1)
             input_sequence = input_sequence.squeeze(-1)
 
-            # select only still running sequences
+            # save new tokens to generations
             running_latest = generations[running_seqs]
-            # update token at position t
             running_latest[:, t] = input_sequence.data
-            # save back
+            print(self.eos_idx, input_sequence.shape, input_sequence.data)
             generations[running_seqs] = running_latest
 
             # update local running sequences
@@ -202,7 +201,8 @@ class PLSentenceVAE(pl.LightningModule):
                 input_sequence = input_sequence[running_seqs]
                 hidden = hidden[:, running_seqs]
                 running_seqs = torch.arange(0, len(running_seqs), device=self.device).long()
-            t += 1
+            else:
+                break
 
         return generations
 
@@ -338,16 +338,17 @@ class PLSentenceVAE(pl.LightningModule):
 
 
 # training
-# model = PLSentenceVAE()
-# trainer = pl.Trainer(max_epochs=8, gpus=1, auto_select_gpus=True)
-# trainer.fit(model)
-# print('Training ended\n')
+model = PLSentenceVAE()
+trainer = pl.Trainer(max_epochs=8, gpus=1, auto_select_gpus=True)
+trainer.fit(model)
+print('Training ended\n')
 
 # inference
-path = 'checkpoints/E1320.pth'
-model = PLSentenceVAE()
-model.load_state_dict(torch.load(path))
-model.cuda()
+# path = 'checkpoints/E1320.pth'
+# model = PLSentenceVAE()
+# model.prepare_data()
+# model.load_state_dict(torch.load(path))
+# model.cuda()
 model.eval()
 # print("Model loaded from %s" % path)
 
