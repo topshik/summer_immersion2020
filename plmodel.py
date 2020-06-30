@@ -169,6 +169,10 @@ class PLSentenceVAE(pl.LightningModule):
 
         hidden = hidden.unsqueeze(0)
 
+        sequence_idx = torch.arange(0, batch_size, device=self.device).long()
+        sequence_running = torch.arange(0, batch_size, device=self.device).long()
+        sequence_mask = torch.ones(batch_size, device=self.device).bool()
+
         # idx of still generating sequences with respect to current loop
         running_seqs = torch.arange(0, batch_size, device=self.device).long()
         # generated_sequenced
@@ -187,10 +191,12 @@ class PLSentenceVAE(pl.LightningModule):
             input_sequence = input_sequence.squeeze(-1)
 
             # save new tokens to generations
-            running_latest = generations[running_seqs]
+            running_latest = generations[sequence_running]
             running_latest[:, t] = input_sequence.data
-            print(self.eos_idx, input_sequence.shape, input_sequence.data)
-            generations[running_seqs] = running_latest
+            generations[sequence_running] = running_latest
+
+            sequence_mask[sequence_running] = (input_sequence != self.eos_idx)
+            sequence_running = sequence_idx.masked_select(sequence_mask)
 
             # update local running sequences
             running_mask = (input_sequence != self.eos_idx).data
@@ -232,7 +238,7 @@ class PLSentenceVAE(pl.LightningModule):
         :return: pytorh dataloader
         """
         train_loader = DataLoader(dataset=self.ptb_train, batch_size=self.batch_size, shuffle=True,
-                                  num_workers=4, pin_memory=torch.cuda.is_available())
+                                  num_workers=4, pin_memory=torch.cuda.is_available(), drop_last=True)
         self.len_train_loader = len(train_loader)
         return train_loader
 
@@ -242,7 +248,7 @@ class PLSentenceVAE(pl.LightningModule):
         :return: pytorh dataloader
         """
         val_loader = DataLoader(dataset=self.ptb_val, batch_size=self.batch_size, num_workers=4,
-                                pin_memory=torch.cuda.is_available())
+                                pin_memory=torch.cuda.is_available(), drop_last=True)
         self.len_val_loader = len(val_loader)
         return val_loader
 
@@ -316,6 +322,11 @@ class PLSentenceVAE(pl.LightningModule):
         return {'ELBO': loss.data, 'NLL loss': nll_loss.data, 'KL loss': kl_loss.data, 'KL weight': kl_weight}
 
     def validation_epoch_end(self, outputs):
+        """
+        Saves model, logs losses at the end of validation epoch
+        :param outputs: list of validation step outputs for all batches
+        :return: dict of averaged logs
+        """
         # TODO lightning saving interface
         save_model_path = 'checkpoints'
         checkpoint_path = os.path.join(save_model_path, "E%i.pth" % self.step)
@@ -338,17 +349,17 @@ class PLSentenceVAE(pl.LightningModule):
 
 
 # training
-model = PLSentenceVAE()
-trainer = pl.Trainer(max_epochs=8, gpus=1, auto_select_gpus=True)
-trainer.fit(model)
-print('Training ended\n')
+# model = PLSentenceVAE()
+# trainer = pl.Trainer(max_epochs=15, gpus=1, auto_select_gpus=True)
+# trainer.fit(model)
+# print('Training ended\n')
 
 # inference
-# path = 'checkpoints/E1320.pth'
-# model = PLSentenceVAE()
-# model.prepare_data()
-# model.load_state_dict(torch.load(path))
-# model.cuda()
+path = 'checkpoints/E2460.pth'
+model = PLSentenceVAE()
+model.prepare_data()
+model.load_state_dict(torch.load(path))
+model.cuda()
 model.eval()
 # print("Model loaded from %s" % path)
 
