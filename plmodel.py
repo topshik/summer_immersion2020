@@ -10,18 +10,21 @@ from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader
 import torch.nn.utils.rnn as rnn_utils
 
+import priors
 from ptb import PTB
 from utils import idx2word, interpolate
 
 
 class PLSentenceVAE(pl.LightningModule):
-    def __init__(self, batch_size: int = 256, vocab_size: int = 9877, k: int = 0.0025, x0: int = 2500,
-                 embedding_size: int = 300, max_sequence_length: int = 50, rnn_type: str = 'gru', latent_size: int = 96,
-                 hidden_size: int = 256, word_dropout: float = 0, embedding_dropout: float = 0.5, num_layers: int = 1,
-                 bidirectional: bool = False, print_every: int = 50) -> None:
+    def __init__(self, prior: str = 'SimpleGaussian', batch_size: int = 256, vocab_size: int = 9877,
+                 k: int = 0.0025, x0: int = 2500, embedding_size: int = 300, max_sequence_length: int = 50,
+                 rnn_type: str = 'gru', latent_size: int = 96, hidden_size: int = 256, word_dropout: float = 0,
+                 embedding_dropout: float = 0.5, num_layers: int = 1, bidirectional: bool = False,
+                 print_every: int = 50) -> None:
         super().__init__()
         # kl annealing params
         self.step = 0
+        self.epoch = 1
         self.k = k
         self.x0 = x0
 
@@ -46,6 +49,11 @@ class PLSentenceVAE(pl.LightningModule):
         self.num_layers = num_layers
         self.hidden_size = hidden_size
         self.latent_size = latent_size
+
+        if prior == 'SimpleGaussian':
+            self.prior = priors.SimpleGaussian(self.batch_size, self.latent_size)
+        else:
+            raise ValueError()
 
         self.embedding = nn.Embedding(vocab_size, embedding_size)
         self.word_dropout_rate = word_dropout
@@ -148,16 +156,15 @@ class PLSentenceVAE(pl.LightningModule):
 
         return logp, mean, logv, z
 
-    def inference(self, n: int = 4, z: torch.Tensor = None) -> torch.Tensor:
+    def inference(self, batch_size: int = 4, z: torch.Tensor = None) -> torch.Tensor:
         """
         Create samples either pure or for interpolation
-        :param n: number of the samples to be produced
+        :param batch_size: number of the samples to be produced
         :param z: sample from variational posterior to be used
         :return: generated sequence
         """
         if z is None:
-            batch_size = n
-            z = torch.randn([batch_size, self.latent_size]).to(self.device)
+            z = self.prior.generate_z(batch_size=batch_size, latent_size=self.latent_size).to(self.device)
         else:
             batch_size = z.size(0)
 
@@ -245,7 +252,7 @@ class PLSentenceVAE(pl.LightningModule):
     def val_dataloader(self) -> DataLoader:
         """
         Create train dataloader from train dataset
-        :return: pytorh dataloader
+        :return: pytorch dataloader
         """
         val_loader = DataLoader(dataset=self.ptb_val, batch_size=self.batch_size, num_workers=4,
                                 pin_memory=torch.cuda.is_available(), drop_last=True)
@@ -263,7 +270,7 @@ class PLSentenceVAE(pl.LightningModule):
         elif anneal_function == 'linear':
             return min(1., self.step / self.x0)
 
-    def loss_fn(self, logp: torch.Tensor, target: torch.Tensor, length: torch.Tensor, mean: torch.Tensor,
+    def loss_fn(self, z, logp: torch.Tensor, target: torch.Tensor, length: torch.Tensor, mean: torch.Tensor,
                 logv: torch.Tensor, anneal_function: str) -> Tuple[torch.Tensor, torch.Tensor, float]:
         """
         Compute loss
@@ -281,14 +288,23 @@ class PLSentenceVAE(pl.LightningModule):
 
         nll = torch.nn.NLLLoss(ignore_index=self.pad_idx, reduction='sum')
         nll_loss = nll(logp, target)
-        kl_loss = -0.5 * torch.sum(1 + logv - mean.pow(2) - logv.exp())
+        # kl_loss = -0.5 * torch.sum(1 + logv - mean.pow(2) - logv.exp())
+        kl_loss = self.kl_loss_mc(z, mean, logv)
         kl_weight = self.kl_anneal_function(anneal_function)
 
         return nll_loss, kl_loss, kl_weight
 
+    def kl_loss_mc(self, z: torch.Tensor, mean, logv):
+        log_q_z = priors.log_normal_diag(z, mean, logv, dim=1)
+        log_p_z = self.prior.log_p_z(z)
+
+        print('logs: ', log_q_z.shape, log_p_z.shape)
+
+        return torch.mean(log_q_z - log_p_z)
+
     def training_step(self, batch: dict, batch_idx: int) -> dict:
         """
-        Perform trainig step
+        Perform training step
         :param batch: dict with keys (input, target, length); contains preprocessed (pad, sos, eos added) input tensor,
         target tensor and lengths of the sentences
         :param batch_idx: number of batch in current epoch
@@ -298,7 +314,7 @@ class PLSentenceVAE(pl.LightningModule):
         logp, mean, logv, z = self.forward(batch['input'], batch['length'])
 
         # loss calculation
-        nll_loss, kl_loss, kl_weight = self.loss_fn(logp, batch['target'], batch['length'], mean, logv, 'logistic')
+        nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, logv, 'logistic')
         loss = (nll_loss + kl_weight * kl_loss) / self.batch_size
         self.step += 1
 
@@ -316,7 +332,7 @@ class PLSentenceVAE(pl.LightningModule):
         logp, mean, logv, z = self.forward(batch['input'], batch['length'])
 
         # loss calculation
-        nll_loss, kl_loss, kl_weight = self.loss_fn(logp, batch['target'], batch['length'], mean, logv, 'logistic')
+        nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, logv, 'logistic')
         loss = (nll_loss + kl_weight * kl_loss) / self.batch_size
 
         return {'ELBO': loss.data, 'NLL loss': nll_loss.data, 'KL loss': kl_loss.data, 'KL weight': kl_weight}
@@ -329,7 +345,8 @@ class PLSentenceVAE(pl.LightningModule):
         """
         # TODO lightning saving interface
         save_model_path = 'checkpoints'
-        checkpoint_path = os.path.join(save_model_path, "E%i.pth" % self.step)
+        checkpoint_path = os.path.join(save_model_path, "E%i.pth" % self.epoch)
+        self.epoch += 1
         torch.save(model.state_dict(), checkpoint_path)
         print("\nModel saved at %s" % checkpoint_path)
 
@@ -349,33 +366,33 @@ class PLSentenceVAE(pl.LightningModule):
 
 
 # training
-# model = PLSentenceVAE()
-# trainer = pl.Trainer(max_epochs=15, gpus=1, auto_select_gpus=True)
-# trainer.fit(model)
-# print('Training ended\n')
+model = PLSentenceVAE()
+trainer = pl.Trainer(max_epochs=10, gpus=1, auto_select_gpus=True)
+trainer.fit(model)
+print('Training ended\n')
 
 # inference
-path = 'checkpoints/E2460.pth'
-model = PLSentenceVAE()
-model.prepare_data()
-model.load_state_dict(torch.load(path))
-model.cuda()
-model.eval()
-# print("Model loaded from %s" % path)
+# path = 'checkpoints/E11.pth'
+# model = PLSentenceVAE()
+# model.prepare_data()
+# model.load_state_dict(torch.load(path))
+# model.cuda()
 
+
+model.eval()
 with open('data/ptb.vocab.json', 'r') as file:
     vocab = json.load(file)
 
 w2i, i2w = vocab['w2i'], vocab['i2w']
 
 n_samples = 10
-samples = model.inference(n=n_samples)
+samples = model.inference(batch_size=n_samples)
 print('----------SAMPLES----------')
 print(*idx2word(samples, i2w=i2w, pad_idx=w2i['<pad>']), sep='\n')
 
 z1 = torch.randn([model.latent_size]).numpy()
 z2 = torch.randn([model.latent_size]).numpy()
-z = torch.from_numpy(interpolate(start=z1, end=z2, steps=8)).float().cuda()
-samples = model.inference(z=z)
+z_in = torch.from_numpy(interpolate(start=z1, end=z2, steps=8)).float().cuda()
+samples = model.inference(z=z_in)
 print('-------INTERPOLATION-------')
 print(*idx2word(samples, i2w=i2w, pad_idx=w2i['<pad>']), sep='\n')
