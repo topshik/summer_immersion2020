@@ -51,7 +51,9 @@ class PLSentenceVAE(pl.LightningModule):
         self.latent_size = latent_size
 
         if prior == 'SimpleGaussian':
-            self.prior = priors.SimpleGaussian(self.batch_size, self.latent_size)
+            self.prior = priors.SimpleGaussian(self.latent_size)
+        elif prior == 'MoG':
+            self.prior = priors.MoG(10, self.latent_size)
         else:
             raise ValueError()
 
@@ -164,7 +166,7 @@ class PLSentenceVAE(pl.LightningModule):
         :return: generated sequence
         """
         if z is None:
-            z = self.prior.generate_z(batch_size=batch_size, latent_size=self.latent_size).to(self.device)
+            z = self.prior.generate_z(batch_size=batch_size).to(self.device)
         else:
             batch_size = z.size(0)
 
@@ -364,8 +366,8 @@ class PLSentenceVAE(pl.LightningModule):
 
 
 # training
-model = PLSentenceVAE()
-trainer = pl.Trainer(max_epochs=8, gpus=1, auto_select_gpus=True)
+model = PLSentenceVAE(prior='MoG')
+trainer = pl.Trainer(max_epochs=7, gpus=1, auto_select_gpus=True)
 trainer.fit(model)
 print('Training ended\n')
 
