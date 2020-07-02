@@ -286,9 +286,9 @@ class PLSentenceVAE(pl.LightningModule):
         target = target[:, :torch.max(length).item()].contiguous().view(-1)
         logp = logp.view(-1, logp.size(2))
 
-        nll = torch.nn.NLLLoss(ignore_index=self.pad_idx, reduction='sum')
+        nll = torch.nn.NLLLoss(ignore_index=self.pad_idx, reduction='mean')
         nll_loss = nll(logp, target)
-        # kl_loss = -0.5 * torch.sum(1 + logv - mean.pow(2) - logv.exp())
+        # kl_loss = (-0.5 * (1 + logv - mean.pow(2) - logv.exp())).sum(dim=1).mean()
         kl_loss = self.kl_loss_mc(z, mean, logv)
         kl_weight = self.kl_anneal_function(anneal_function)
 
@@ -297,8 +297,6 @@ class PLSentenceVAE(pl.LightningModule):
     def kl_loss_mc(self, z: torch.Tensor, mean, logv):
         log_q_z = priors.log_normal_diag(z, mean, logv, dim=1)
         log_p_z = self.prior.log_p_z(z)
-
-        print('logs: ', log_q_z.shape, log_p_z.shape)
 
         return torch.mean(log_q_z - log_p_z)
 
@@ -367,7 +365,7 @@ class PLSentenceVAE(pl.LightningModule):
 
 # training
 model = PLSentenceVAE()
-trainer = pl.Trainer(max_epochs=10, gpus=1, auto_select_gpus=True)
+trainer = pl.Trainer(max_epochs=8, gpus=1, auto_select_gpus=True)
 trainer.fit(model)
 print('Training ended\n')
 
