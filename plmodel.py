@@ -16,24 +16,24 @@ from utils import idx2word, interpolate
 
 
 class PLSentenceVAE(pl.LightningModule):
-    def __init__(self, prior: str = 'SimpleGaussian', batch_size: int = 256, vocab_size: int = 9877,
-                 k: int = 0.0025, x0: int = 2500, embedding_size: int = 300, max_sequence_length: int = 50,
-                 rnn_type: str = 'gru', latent_size: int = 96, hidden_size: int = 256, word_dropout: float = 0,
-                 embedding_dropout: float = 0.5, num_layers: int = 1, bidirectional: bool = False,
-                 print_every: int = 50) -> None:
+    def __init__(self, prior: str = 'SimpleGaussian', n_components: int = 200, batch_size: int = 256,
+                 vocab_size: int = 9877, k: int = 0.0025, x0: int = 2500, embedding_size: int = 300,
+                 max_sequence_length: int = 50, rnn_type: str = 'gru', latent_size: int = 96, hidden_size: int = 256,
+                 word_dropout: float = 0, embedding_dropout: float = 0.5, num_layers: int = 1,
+                 bidirectional: bool = False, print_every: int = 50) -> None:
         super().__init__()
-        # kl annealing params
+
         self.step = 0
         self.epoch = 1
+
+        # kl annealing params
         self.k = k
         self.x0 = x0
 
         # datasets and their params, are set in prepare_data()
         self.batch_size = batch_size
         self.len_train_loader, self.len_val_loader = 0, 0
-        self.ptb_train, self.ptb_val = None, None
-
-        self.print_every = print_every
+        self.ptb_train, self.ptb_val = None, None  # TODO: outer dataset init
 
         # tokens info
         self.max_sequence_length = max_sequence_length
@@ -53,7 +53,7 @@ class PLSentenceVAE(pl.LightningModule):
         if prior == 'SimpleGaussian':
             self.prior = priors.SimpleGaussian(self.latent_size)
         elif prior == 'MoG':
-            self.prior = priors.MoG(10, self.latent_size)
+            self.prior = priors.MoG(n_components, self.latent_size)
         else:
             raise ValueError()
 
@@ -366,14 +366,14 @@ class PLSentenceVAE(pl.LightningModule):
 
 
 # training
-model = PLSentenceVAE(prior='MoG')
-trainer = pl.Trainer(max_epochs=7, gpus=1, auto_select_gpus=True)
+model = PLSentenceVAE(prior='MoG', n_components=500)
+trainer = pl.Trainer(max_epochs=25, gpus=1, auto_select_gpus=True)
 trainer.fit(model)
 print('Training ended\n')
 
 # inference
-# path = 'checkpoints/E11.pth'
-# model = PLSentenceVAE()
+# path = 'checkpoints/E10.pth'
+# model = PLSentenceVAE(prior='MoG', n_components=500)
 # model.prepare_data()
 # model.load_state_dict(torch.load(path))
 # model.cuda()
