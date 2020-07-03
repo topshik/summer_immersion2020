@@ -12,6 +12,7 @@ def log_normal_diag(z, mean, log_var,  dim=None):
 
 
 class Prior:
+    # TODO: manage devices and latent_size
     def log_p_z(self, z) -> torch.Tensor:
         pass
 
@@ -66,3 +67,55 @@ class MoG(Prior):
     def init_comp(self):
         self.mog_mu.data.normal_(0, 0.5)
         self.mog_logvar.data.fill_(-2)
+
+
+class Vamp(Prior):
+    def __init__(self, n_components, latent_size, input_size, encoder):
+        super().__init__()
+        self.n_components = n_components
+        self.latent_size = latent_size
+        self.input_size = input_size
+        self.encoder = encoder
+
+        # word embeddings values
+        # self.pseudoinputs_mean = torch.zeros(self.n_components)
+        # self.pseudoinputs_std = torch.ones(self.n_components)
+        self.pseudoinputs_mean = 0.
+        self.pseudoinputs_std = 1.
+        min_inp = -10
+
+        self.means = nn.Sequential(nn.Linear(self.n_components, self.input_size.prod().item(), bias=False),
+                                   nn.Hardtanh(min_val=min_inp, max_val=1.0)).cuda()
+
+        self.means[0].weight.data.normal_(self.pseudoinputs_mean, self.pseudoinputs_std)
+
+        # create an idle input for calling pseudo-inputs
+        self.idle_input = nn.Parameter(torch.eye(self.n_components, self.n_components), requires_grad=False).cuda()
+        # self.idle_input.data = torch.eye(self.n_components, self.n_components)
+
+    def log_p_z(self, z):
+        # z: MB x hid
+        # C x inp_dim
+        x = self.means(self.idle_input).reshape(torch.Size([self.n_components]) + torch.Size(self.input_size))
+
+        z_p_mean, z_p_logvar = self.encoder(x)  # C x hid
+        z_expand = z.unsqueeze(1)  # MB x 1 x hid
+        means = z_p_mean.unsqueeze(0)  # 1 x C x hid
+        logvars = z_p_logvar.unsqueeze(0)  # 1 x C x hid
+
+        # MB x C
+        log_comps = log_normal_diag(z_expand, means, logvars, dim=2) - math.log(self.n_components)
+        log_prior = torch.logsumexp(log_comps, dim=1)  # MB x 1
+
+        return log_prior
+
+    def generate_z(self, batch_size=25):
+        idx = np.random.choice(self.n_components, size=batch_size, replace=True)
+        # batch_size x inp_dim
+        means = self.means(self.idle_input[idx]).reshape(torch.Size([batch_size]) + torch.Size(self.input_size))
+        z_sample_gen_mean, z_sample_gen_logvar = self.encoder(means)  # batch_size x hid
+        z = torch.randn([batch_size, self.latent_size]).cuda()
+        z *= z_sample_gen_logvar.data.exp()
+        z += z_sample_gen_mean.data
+
+        return z

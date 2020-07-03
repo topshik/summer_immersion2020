@@ -16,11 +16,11 @@ from utils import idx2word, interpolate
 
 
 class PLSentenceVAE(pl.LightningModule):
-    def __init__(self, prior: str = 'SimpleGaussian', n_components: int = 200, batch_size: int = 256,
-                 vocab_size: int = 9877, k: int = 0.0025, x0: int = 2500, embedding_size: int = 300,
-                 max_sequence_length: int = 50, rnn_type: str = 'gru', latent_size: int = 96, hidden_size: int = 256,
-                 word_dropout: float = 0, embedding_dropout: float = 0.5, num_layers: int = 1,
-                 bidirectional: bool = False, print_every: int = 50) -> None:
+    def __init__(self, batch_size: int = 256, vocab_size: int = 9877, max_sequence_length: int = 50,
+                 embedding_size: int = 300, latent_size: int = 96, hidden_size: int = 256, word_dropout: float = 0,
+                 embedding_dropout: float = 0.5, rnn_type: str = 'gru', num_layers: int = 1,
+                 bidirectional: bool = False, prior: str = 'SimpleGaussian', n_components: int = 200,
+                 k: int = 0.0025, x0: int = 2500) -> None:
         super().__init__()
 
         self.step = 0
@@ -54,6 +54,11 @@ class PLSentenceVAE(pl.LightningModule):
             self.prior = priors.SimpleGaussian(self.latent_size)
         elif prior == 'MoG':
             self.prior = priors.MoG(n_components, self.latent_size)
+        elif prior == 'Vamp':
+            self.n_components = n_components
+            self.prior = priors.Vamp(n_components, self.latent_size,
+                                     input_size=torch.tensor([max_sequence_length, embedding_size]),
+                                     encoder=self.q_z)
         else:
             raise ValueError()
 
@@ -72,15 +77,45 @@ class PLSentenceVAE(pl.LightningModule):
 
         self.encoder_rnn = rnn(embedding_size, hidden_size, num_layers=num_layers, bidirectional=self.bidirectional,
                                batch_first=True)
+
+        self.hidden_factor = (2 if bidirectional else 1) * num_layers
+        self.hidden2mean = nn.Linear(hidden_size * self.hidden_factor, latent_size)
+        self.hidden2logv = nn.Linear(hidden_size * self.hidden_factor, latent_size)
+
+        self.latent2hidden = nn.Linear(latent_size, hidden_size * self.hidden_factor)
         self.decoder_rnn = rnn(embedding_size, hidden_size, num_layers=num_layers, bidirectional=self.bidirectional,
                                batch_first=True)
 
-        self.hidden_factor = (2 if bidirectional else 1) * num_layers
-
-        self.hidden2mean = nn.Linear(hidden_size * self.hidden_factor, latent_size)
-        self.hidden2logv = nn.Linear(hidden_size * self.hidden_factor, latent_size)
-        self.latent2hidden = nn.Linear(latent_size, hidden_size * self.hidden_factor)
         self.outputs2vocab = nn.Linear(hidden_size * (2 if bidirectional else 1), vocab_size)
+
+    def q_z(self, input_embedding: torch.Tensor, sorted_lengths: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Encoder forward pass
+        :param input_embedding: batch of embedded input sequences
+        :param sorted_lengths: lengths of the sequences sorted in descending order
+        :return: mean and logvar of the variational posterior
+        """
+        if sorted_lengths is None:
+            sorted_lengths = torch.ones(input_embedding.shape[0]) * self.max_sequence_length
+
+        packed_input = rnn_utils.pack_padded_sequence(input_embedding, sorted_lengths.data.tolist(), batch_first=True)
+        _, hidden = self.encoder_rnn(packed_input)
+
+        if self.rnn_type == 'lstm':
+            hidden = hidden[0]
+
+        if self.bidirectional or self.num_layers > 1:
+            # flatten hidden state
+            # possibly incorrect, maybe need to permute
+            hidden = hidden.view(self.batch_size, self.hidden_size * self.hidden_factor)
+        else:
+            hidden = hidden.squeeze()
+
+        # reparametrization
+        mean = self.hidden2mean(hidden)
+        logv = self.hidden2logv(hidden)
+
+        return mean, logv
 
     def forward(self, input_sequence: torch.Tensor, length: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor,
                                                                                    torch.Tensor, torch.Tensor]:
@@ -99,22 +134,7 @@ class PLSentenceVAE(pl.LightningModule):
 
         # encoder
         input_embedding = self.embedding(input_sequence)
-        packed_input = rnn_utils.pack_padded_sequence(input_embedding, sorted_lengths.data.tolist(), batch_first=True)
-        _, hidden = self.encoder_rnn(packed_input)
-
-        if self.rnn_type == 'lstm':
-            hidden = hidden[0]
-
-        if self.bidirectional or self.num_layers > 1:
-            # flatten hidden state
-            # possibly incorrect, maybe need to permute
-            hidden = hidden.view(self.batch_size, self.hidden_size * self.hidden_factor)
-        else:
-            hidden = hidden.squeeze()
-
-        # reparametrization
-        mean = self.hidden2mean(hidden)
-        logv = self.hidden2logv(hidden)
+        mean, logv = self.q_z(input_embedding, sorted_lengths)
         std = torch.exp(0.5 * logv)
 
         z = torch.randn([self.batch_size, self.latent_size]).to(self.device)
@@ -366,17 +386,17 @@ class PLSentenceVAE(pl.LightningModule):
 
 
 # training
-model = PLSentenceVAE(prior='MoG', n_components=500)
-trainer = pl.Trainer(max_epochs=25, gpus=1, auto_select_gpus=True)
-trainer.fit(model)
-print('Training ended\n')
+# model = PLSentenceVAE(prior='Vamp', n_components=500, batch_size=64)
+# trainer = pl.Trainer(max_epochs=25, gpus=1, auto_select_gpus=True)
+# trainer.fit(model)
+# print('Training ended\n')
 
 # inference
-# path = 'checkpoints/E10.pth'
-# model = PLSentenceVAE(prior='MoG', n_components=500)
-# model.prepare_data()
-# model.load_state_dict(torch.load(path))
-# model.cuda()
+path = 'checkpoints/E10.pth'
+model = PLSentenceVAE(prior='Vamp', n_components=500, batch_size=64)
+model.prepare_data()
+model.load_state_dict(torch.load(path))
+model.cuda()
 
 
 model.eval()
