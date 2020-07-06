@@ -335,7 +335,7 @@ class PLSentenceVAE(pl.LightningModule):
 
         # loss calculation
         nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, logv, 'logistic')
-        loss = (nll_loss + kl_weight * kl_loss) / self.batch_size
+        loss = nll_loss + kl_weight * kl_loss
         self.step += 1
 
         return {'loss': loss, 'NLL loss': nll_loss.data, 'KL loss': kl_loss.data, 'KL weight': kl_weight}
@@ -353,7 +353,7 @@ class PLSentenceVAE(pl.LightningModule):
 
         # loss calculation
         nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, logv, 'logistic')
-        loss = (nll_loss + kl_weight * kl_loss) / self.batch_size
+        loss = nll_loss + kl_weight * kl_loss
 
         return {'ELBO': loss.data, 'NLL loss': nll_loss.data, 'KL loss': kl_loss.data, 'KL weight': kl_weight}
 
@@ -386,18 +386,41 @@ class PLSentenceVAE(pl.LightningModule):
 
 
 # training
-# model = PLSentenceVAE(prior='Vamp', n_components=500, batch_size=64)
-# trainer = pl.Trainer(max_epochs=25, gpus=1, auto_select_gpus=True)
+# model = PLSentenceVAE(prior='Vamp', n_components=500, batch_size=256)
+# model.prepare_data()
+# n_reconstructions = 10
+# print(idx2word(model.ptb_train[1]))
+
+# trainer = pl.Trainer(max_epochs=10, gpus=1, auto_select_gpus=True)
 # trainer.fit(model)
 # print('Training ended\n')
 
+# TODO: create separate function
+# original_sentences = model.ptb_train[1: 1 + n_reconstructions]
+# original_inputs = {key: torch.tensor(value) for key, value in original_sentences.items()}
+# _, _, _, reconstructions_z = model.forward(original_inputs['input'], original_inputs['length'])
+# samples = model.inference(z=z_in)
+# reconstructs = print(*idx2word(samples, i2w=i2w, pad_idx=w2i['<pad>']), sep='\n')
+# print('----------RECONSTRUCTIONS----------')
+# for i in range(1, n_reconstructions + 1):
+
 # inference
-path = 'checkpoints/E10.pth'
-model = PLSentenceVAE(prior='Vamp', n_components=500, batch_size=64)
+path = 'checkpoints/E11.pth'
+model = PLSentenceVAE(prior='Vamp', n_components=500, batch_size=256)
 model.prepare_data()
 model.load_state_dict(torch.load(path))
 model.cuda()
 
+model.eval()
+with open('data/ptb.vocab.json', 'r') as file:
+    vocab = json.load(file)
+w2i, i2w = vocab['w2i'], vocab['i2w']
+print('----------PSEUDO INPUTS----------')
+idx_list = np.random.choice(np.arange(500), size=20)
+for idx in idx_list:
+    z_in = model.prior.generate_z(1, idx)
+    samples = model.inference(z=z_in)
+    print(idx, ': ', *idx2word(samples, i2w=i2w, pad_idx=w2i['<pad>']), sep='\n', end='\n')
 
 model.eval()
 with open('data/ptb.vocab.json', 'r') as file:
