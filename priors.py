@@ -109,8 +109,9 @@ class Vamp(Prior):
 
         return log_prior
 
-    def generate_z(self, batch_size=25):
-        idx = np.random.choice(self.n_components, size=batch_size, replace=True)
+    def generate_z(self, batch_size=25, idx=None):
+        if idx is None:
+            idx = np.random.choice(self.n_components, size=batch_size, replace=True)
         # batch_size x inp_dim
         means = self.means(self.idle_input[idx]).reshape(torch.Size([batch_size]) + torch.Size(self.input_size))
         z_sample_gen_mean, z_sample_gen_logvar = self.encoder(means)  # batch_size x hid
