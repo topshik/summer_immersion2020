@@ -51,12 +51,12 @@ class PLSentenceVAE(pl.LightningModule):
         self.latent_size = latent_size
 
         if prior == 'SimpleGaussian':
-            self.prior = priors.SimpleGaussian(self.latent_size)
+            self.prior = priors.SimpleGaussian(torch.device('cuda'), self.latent_size)
         elif prior == 'MoG':
-            self.prior = priors.MoG(n_components, self.latent_size)
+            self.prior = priors.MoG(torch.device('cuda'), n_components, self.latent_size)
         elif prior == 'Vamp':
             self.n_components = n_components
-            self.prior = priors.Vamp(n_components, self.latent_size,
+            self.prior = priors.Vamp(torch.device('cuda'), n_components, self.latent_size,
                                      input_size=torch.tensor([max_sequence_length, embedding_size]),
                                      encoder=self.q_z)
         else:
@@ -80,7 +80,7 @@ class PLSentenceVAE(pl.LightningModule):
 
         self.hidden_factor = (2 if bidirectional else 1) * num_layers
         self.hidden2mean = nn.Linear(hidden_size * self.hidden_factor, latent_size)
-        self.hidden2logv = nn.Linear(hidden_size * self.hidden_factor, latent_size)
+        self.hidden2log_var = nn.Linear(hidden_size * self.hidden_factor, latent_size)
 
         self.latent2hidden = nn.Linear(latent_size, hidden_size * self.hidden_factor)
         self.decoder_rnn = rnn(embedding_size, hidden_size, num_layers=num_layers, bidirectional=self.bidirectional,
@@ -88,12 +88,16 @@ class PLSentenceVAE(pl.LightningModule):
 
         self.outputs2vocab = nn.Linear(hidden_size * (2 if bidirectional else 1), vocab_size)
 
-    def q_z(self, input_embedding: torch.Tensor, sorted_lengths: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def q_z(self, input_embedding: torch.Tensor, sorted_lengths: torch.Tensor = None) -> \
+            Tuple[torch.Tensor, torch.Tensor]:
         """
         Encoder forward pass
-        :param input_embedding: batch of embedded input sequences
-        :param sorted_lengths: lengths of the sequences sorted in descending order
-        :return: mean and logvar of the variational posterior
+        :param input_embedding: batch of embedded input sequences,
+                                tensor of shape [batch_size, max_sequence_length, embedding_size]
+        :param sorted_lengths: lengths of the sequences sorted in descending order,
+                               tensor of shape [batch_size]
+        :return: mean and log_var of the variational posterior,
+                 tensors of shapes [batch_size x latent_size]
         """
         if sorted_lengths is None:
             sorted_lengths = torch.ones(input_embedding.shape[0]) * self.max_sequence_length
@@ -113,16 +117,16 @@ class PLSentenceVAE(pl.LightningModule):
 
         # reparametrization
         mean = self.hidden2mean(hidden)
-        logv = self.hidden2logv(hidden)
+        log_var = self.hidden2log_var(hidden)
 
-        return mean, logv
+        return mean, log_var
 
     def forward(self, input_sequence: torch.Tensor, length: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor,
                                                                                    torch.Tensor, torch.Tensor]:
         """
         Perform forward pass for the model
-        :param input_sequence: preprocessed sentences (pad, sos, eos added)
-        :param length: lengths of the sentences
+        :param input_sequence: preprocessed sentences (pad, sos, eos added),
+        :param length: lengths of the sentences, tensor of shape [batch_size]
         :return: tuple of four torch.Tensors:
             1st - prediction logits
             2nd - mean of variational posterior
@@ -134,8 +138,8 @@ class PLSentenceVAE(pl.LightningModule):
 
         # encoder
         input_embedding = self.embedding(input_sequence)
-        mean, logv = self.q_z(input_embedding, sorted_lengths)
-        std = torch.exp(0.5 * logv)
+        mean, log_var = self.q_z(input_embedding, sorted_lengths)
+        std = torch.exp(0.5 * log_var)
 
         z = torch.randn([self.batch_size, self.latent_size]).to(self.device)
         z = z * std + mean
@@ -178,7 +182,7 @@ class PLSentenceVAE(pl.LightningModule):
         # disable <unk> tokens
         # logp.data[:, :, self.unk_idx] -= 1e12
 
-        return logp, mean, logv, z
+        return logp, mean, log_var, z
 
     def inference(self, batch_size: int = 4, z: torch.Tensor = None) -> torch.Tensor:
         """
@@ -288,7 +292,7 @@ class PLSentenceVAE(pl.LightningModule):
     def kl_anneal_function(self, anneal_function: str) -> float:
         """
         Compute current KL divergence coefficient
-        :param anneal_function:
+        :param anneal_function: either linear, logistic or zero
         :return: coefficient
         """
         if anneal_function == 'logistic':
@@ -299,15 +303,16 @@ class PLSentenceVAE(pl.LightningModule):
             return 0
 
     def loss_fn(self, z, logp: torch.Tensor, target: torch.Tensor, length: torch.Tensor, mean: torch.Tensor,
-                logv: torch.Tensor, anneal_function: str) -> Tuple[torch.Tensor, torch.Tensor, float]:
+                log_var: torch.Tensor, anneal_function: str) -> Tuple[torch.Tensor, torch.Tensor, float]:
         """
         Compute loss
-        :param logp: prediction logits tensor of shape [batch_size, batch_max_sentence_length, vocab_size]
+        :param z: latent representation
+        :param logp: prediction logits tensor of shape [batch_size, max_sentence_length, vocab_size]
         :param target: target tensor of shape [batch_size, max_sentence_length]
         :param length: sentences lengths tensor of shape [batch_size]
-        :param mean: mean of the variational posterior of shape [batch_size]
-        :param logv: log variance of the variational posterior of shape [batch_size]
-        :param anneal_function: type on the annealing: either linear or logistic
+        :param mean: mean of the variational posterior of shape [batch_size, latent_size]
+        :param log_var: log variance of the variational posterior of shape [batch_size, latent_size]
+        :param anneal_function: type on the annealing: either linear, logistic or zero
         :return: tuple of reconstruction loss, KL loss and KL weight
         """
         # cut-off unnecessary padding from target, and flatten
@@ -316,17 +321,24 @@ class PLSentenceVAE(pl.LightningModule):
         logp = logp.view(-1, logp.size(2))
 
         nll = torch.nn.NLLLoss(ignore_index=self.pad_idx, reduction='sum')
-        nll_loss = nll(logp, target)
-        kl_loss = self.kl_loss_mc(z, mean, logv)
+        nll_loss = nll(logp, target) / self.batch_size
+        kl_loss = self.kl_loss_mc(z, mean, log_var)
         kl_weight = self.kl_anneal_function(anneal_function)
 
         return nll_loss, kl_loss, kl_weight
 
-    def kl_loss_mc(self, z: torch.Tensor, mean, logv) -> torch.Tensor:
-        log_q_z = priors.log_normal_diag(z, mean, logv, dim=1)
+    def kl_loss_mc(self, z: torch.Tensor, mean, log_var) -> torch.Tensor:
+        """
+        Monte Carlo estimator for KL divergence loss part
+        :param z: latent representation, tensor of shape [batch_size x latent_size]
+        :param mean: mean of the variational posterior, tensor of shape [batch_size, latent_size]
+        :param log_var: log variance of the variational posterior, tensor of shape [batch_size, latent_size]
+        :return: batch averaged KL loss
+        """
+        log_q_z = priors.log_normal_diag(z, mean, log_var, dim=1)
         log_p_z = self.prior.log_p_z(z)
 
-        return torch.sum(log_q_z - log_p_z)
+        return torch.mean(log_q_z - log_p_z)
 
     def training_step(self, batch: dict, batch_idx: int) -> dict:
         """
@@ -337,12 +349,11 @@ class PLSentenceVAE(pl.LightningModule):
         :return: dict with training logs
         """
         # Forward pass
-        logp, mean, logv, z = self.forward(batch['input'], batch['length'])
+        logp, mean, log_var, z = self.forward(batch['input'], batch['length'])
 
         # loss calculation
-        nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, logv, 'logistic')
-        nll_loss /= self.batch_size
-        kl_loss /= self.batch_size
+        nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, log_var,
+                                                    'logistic')
         loss = nll_loss + kl_weight * kl_loss
         self.step += 1
 
@@ -350,6 +361,11 @@ class PLSentenceVAE(pl.LightningModule):
 
     def training_epoch_end(self, outputs: Union[List[Dict[str, torch.Tensor]], List[List[Dict[str, torch.Tensor]]]]) \
             -> Dict[str, Dict[str, torch.Tensor]]:
+        """
+        Log losses to tensorboard
+        :param outputs: list of validation step outputs for all batches
+        :return: dict of averaged logs
+        """
         avg_elbo = torch.stack([x['loss'] for x in outputs]).mean()
         avg_nll = torch.stack([x['NLL loss'] for x in outputs]).mean()
         avg_kl = torch.stack([x['KL loss'] for x in outputs]).mean()
@@ -366,12 +382,11 @@ class PLSentenceVAE(pl.LightningModule):
         :return: dict with training logs
         """
         # Forward pass
-        logp, mean, logv, z = self.forward(batch['input'], batch['length'])
+        logp, mean, log_var, z = self.forward(batch['input'], batch['length'])
 
         # loss calculation
-        nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, logv, 'logistic')
-        nll_loss /= self.batch_size
-        kl_loss /= self.batch_size
+        nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, log_var,
+                                                    'logistic')
         loss = nll_loss + kl_weight * kl_loss
 
         return {'loss': loss.data, 'NLL loss': nll_loss.data, 'KL loss': kl_loss.data, 'KL weight': kl_weight}
@@ -379,7 +394,7 @@ class PLSentenceVAE(pl.LightningModule):
     def validation_epoch_end(self, outputs: Union[List[Dict[str, torch.Tensor]], List[List[Dict[str, torch.Tensor]]]]) \
             -> Dict[str, Dict[str, torch.Tensor]]:
         """
-        Saves model, logs losses at the end of validation epoch
+        Save model, logs losses at the end of validation epoch
         :param outputs: list of validation step outputs for all batches
         :return: dict of averaged logs
         """
@@ -408,7 +423,9 @@ class PLSentenceVAE(pl.LightningModule):
 
 # training
 # model = PLSentenceVAE(batch_size=256, hidden_size=191, embedding_size=353, latent_size=13, word_dropout=0.62)
-model = PLSentenceVAE(prior='Vamp', n_components=300, batch_size=256, hidden_size=191, embedding_size=353,
+# model = PLSentenceVAE(prior='Vamp', n_components=300, batch_size=256, hidden_size=191, embedding_size=353,
+#                       latent_size=13, word_dropout=0.62)
+model = PLSentenceVAE(prior='MoG', n_components=300, batch_size=256, hidden_size=191, embedding_size=353,
                       latent_size=13, word_dropout=0.62)
 model.prepare_data()
 trainer = pl.Trainer(max_epochs=20, gpus=1, auto_select_gpus=True)

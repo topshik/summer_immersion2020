@@ -1,4 +1,4 @@
-from collections import defaultdict
+from collections import Counter, defaultdict, OrderedDict
 import io
 import json
 import os
@@ -7,7 +7,14 @@ from nltk.tokenize import TweetTokenizer
 import numpy as np
 from torch.utils.data import Dataset
 
-from utils import OrderedCounter
+
+class OrderedCounter(Counter, OrderedDict):
+    """Counter that remembers the order elements are first encountered"""
+    def __repr__(self):
+        return '%s(%r)' % (self.__class__.__name__, OrderedDict(self))
+
+    def __reduce__(self):
+        return self.__class__, (OrderedDict(self),)
 
 
 class PTB(Dataset):
@@ -87,14 +94,11 @@ class PTB(Dataset):
         self.w2i, self.i2w = vocab['w2i'], vocab['i2w']
 
     def _create_data(self):
-
         if self.split == 'train':
             self._create_vocab()
         else:
             self._load_vocab()
-
         tokenizer = TweetTokenizer(preserve_case=False)
-
         data = defaultdict(dict)
         with open(self.raw_data_path, 'r') as file:
             for i, line in enumerate(file):
@@ -106,7 +110,7 @@ class PTB(Dataset):
                 target = words[:self.max_sequence_length-1]
                 target = target + ['<eos>']
 
-                assert len(input) == len(target), "%i, %i"%(len(input), len(target))
+                assert len(input) == len(target), "%i, %i" % (len(input), len(target))
                 length = len(input)
 
                 input.extend(['<pad>'] * (self.max_sequence_length-length))
