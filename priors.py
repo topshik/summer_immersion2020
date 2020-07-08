@@ -123,9 +123,9 @@ class Vamp(Prior):
         # components_num x input_size
         x = self.means(self.idle_input).reshape(torch.Size([self.n_components]) + torch.Size(self.input_size))
         z_p_mean, z_p_log_var = self.encoder(x)  # components_num x latent_size
-        z_expand = z.unsqueeze(1)               # batch_size x 1 x latent_size
-        means = z_p_mean.unsqueeze(0)           # 1 x components_num x latent_size
-        log_vars = z_p_log_var.unsqueeze(0)       # 1 x components_num x latent_size
+        z_expand = z.unsqueeze(1)                # batch_size x 1 x latent_size
+        means = z_p_mean.unsqueeze(0)            # 1 x components_num x latent_size
+        log_vars = z_p_log_var.unsqueeze(0)      # 1 x components_num x latent_size
 
         # batch_size x components_num
         log_comps = log_normal_diag(z_expand, means, log_vars, dim=2) - math.log(self.n_components)

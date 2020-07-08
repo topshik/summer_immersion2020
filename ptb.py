@@ -18,12 +18,12 @@ class OrderedCounter(Counter, OrderedDict):
 
 
 class PTB(Dataset):
-    def __init__(self, data_dir, split, create_data, **kwargs):
+    def __init__(self, data_dir, split, create_data, min_occ=1, **kwargs):
         super().__init__()
         self.data_dir = data_dir
         self.split = split
         self.max_sequence_length = kwargs.get('max_sequence_length', 50)
-        self.min_occ = kwargs.get('min_occ', 3)
+        self.min_occ = min_occ
 
         self.raw_data_path = os.path.join(data_dir, 'ptb.'+split+'.txt')
         self.data_file = 'ptb.'+split+'.json'

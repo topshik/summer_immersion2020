@@ -16,32 +16,36 @@ from utils import idx2word, interpolate
 
 
 class PLSentenceVAE(pl.LightningModule):
-    def __init__(self, batch_size: int = 256, vocab_size: int = 9877, max_sequence_length: int = 50,
-                 embedding_size: int = 300, latent_size: int = 256, hidden_size: int = 256, word_dropout: float = 0,
-                 embedding_dropout: float = 0.5, rnn_type: str = 'gru', num_layers: int = 1,
+    def __init__(self, batch_size: int = 256, max_sequence_length: int = 50, data_directory: str = 'data',
+                 create_data: bool = False, embedding_size: int = 300, hidden_size: int = 256, latent_size: int = 256,
+                 word_dropout: float = 0, embedding_dropout: float = 0.5, rnn_type: str = 'gru', num_layers: int = 1,
                  bidirectional: bool = False, prior: str = 'SimpleGaussian', n_components: int = 200,
-                 k: int = 0.0025, x0: int = 2500) -> None:
+                 anneal_function: str = 'logistic', k: int = 0.0025, x0: int = 2500) -> None:
         super().__init__()
 
         self.step = 0
         self.epoch = 1
 
         # kl annealing params
+        self.anneal_function = anneal_function
         self.k = k
         self.x0 = x0
 
-        # datasets and their params, are set in prepare_data()
+        # datasets and their params
+        self.max_sequence_length = max_sequence_length
+        self.ptb_train = PTB(data_dir=data_directory, split='train', create_data=create_data,
+                             max_sequence_length=self.max_sequence_length)
+        self.ptb_val = PTB(data_dir=data_directory, split='valid', create_data=create_data,
+                           max_sequence_length=self.max_sequence_length)
+        self.sos_idx = self.ptb_train.sos_idx
+        self.eos_idx = self.ptb_train.eos_idx
+        self.pad_idx = self.ptb_train.pad_idx
+        self.unk_idx = self.ptb_train.unk_idx
+        self.vocab_size = self.ptb_train.vocab_size
+
+        # dataloaders
         self.batch_size = batch_size
         self.len_train_loader, self.len_val_loader = 0, 0
-        self.ptb_train, self.ptb_val = None, None  # TODO: outer dataset init
-
-        # tokens info
-        self.max_sequence_length = max_sequence_length
-        self.sos_idx = 0
-        self.eos_idx = 0
-        self.pad_idx = 0
-        self.unk_idx = 0
-        self.vocab_size = vocab_size
 
         # net params and architecture
         self.rnn_type = rnn_type
@@ -62,7 +66,7 @@ class PLSentenceVAE(pl.LightningModule):
         else:
             raise ValueError()
 
-        self.embedding = nn.Embedding(vocab_size, embedding_size)
+        self.embedding = nn.Embedding(self.vocab_size, embedding_size)
         self.word_dropout_rate = word_dropout
         self.embedding_dropout = nn.Dropout(p=embedding_dropout)
 
@@ -86,7 +90,7 @@ class PLSentenceVAE(pl.LightningModule):
         self.decoder_rnn = rnn(embedding_size, hidden_size, num_layers=num_layers, bidirectional=self.bidirectional,
                                batch_first=True)
 
-        self.outputs2vocab = nn.Linear(hidden_size * (2 if bidirectional else 1), vocab_size)
+        self.outputs2vocab = nn.Linear(hidden_size * (2 if bidirectional else 1), self.vocab_size)
 
     def q_z(self, input_embedding: torch.Tensor, sorted_lengths: torch.Tensor = None) -> \
             Tuple[torch.Tensor, torch.Tensor]:
@@ -144,7 +148,7 @@ class PLSentenceVAE(pl.LightningModule):
         z = torch.randn([self.batch_size, self.latent_size]).to(self.device)
         z = z * std + mean
 
-        # DECODER
+        # decoder
         hidden = self.latent2hidden(z)
 
         if self.bidirectional or self.num_layers > 1:
@@ -249,26 +253,6 @@ class PLSentenceVAE(pl.LightningModule):
 
         return generations
 
-    def prepare_data(self) -> None:
-        """
-        Load datasets
-        """
-        # defaults from args, TODO: remove to parameters
-        data_dir = 'data'
-        create_data = False
-        splits = ['train', 'valid']
-        min_occ = 1
-
-        datasets = {}
-        for split in splits:
-            datasets[split] = PTB(data_dir=data_dir, split=split, create_data=create_data,
-                                  max_sequence_length=self.max_sequence_length, min_occ=min_occ)
-        self.ptb_train, self.ptb_val = datasets['train'], datasets['valid']
-        self.sos_idx = self.ptb_train.sos_idx
-        self.eos_idx = self.ptb_train.eos_idx
-        self.pad_idx = self.ptb_train.pad_idx
-        self.unk_idx = self.ptb_train.unk_idx
-
     def train_dataloader(self) -> DataLoader:
         """
         Create train dataloader from train dataset
@@ -287,23 +271,23 @@ class PLSentenceVAE(pl.LightningModule):
         val_loader = DataLoader(dataset=self.ptb_val, batch_size=self.batch_size, num_workers=4,
                                 pin_memory=torch.cuda.is_available(), drop_last=True)
         self.len_val_loader = len(val_loader)
+
         return val_loader
 
-    def kl_anneal_function(self, anneal_function: str) -> float:
+    def kl_anneal_function(self) -> float:
         """
         Compute current KL divergence coefficient
-        :param anneal_function: either linear, logistic or zero
         :return: coefficient
         """
-        if anneal_function == 'logistic':
+        if self.anneal_function == 'logistic':
             return float(1 / (1 + np.exp(-self.k * (self.step - self.x0))))
-        elif anneal_function == 'linear':
+        elif self.anneal_function == 'linear':
             return min(1., self.step / self.x0)
-        elif anneal_function == 'zero':
+        elif self.anneal_function == 'zero':
             return 0
 
     def loss_fn(self, z, logp: torch.Tensor, target: torch.Tensor, length: torch.Tensor, mean: torch.Tensor,
-                log_var: torch.Tensor, anneal_function: str) -> Tuple[torch.Tensor, torch.Tensor, float]:
+                log_var: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, float]:
         """
         Compute loss
         :param z: latent representation
@@ -312,7 +296,6 @@ class PLSentenceVAE(pl.LightningModule):
         :param length: sentences lengths tensor of shape [batch_size]
         :param mean: mean of the variational posterior of shape [batch_size, latent_size]
         :param log_var: log variance of the variational posterior of shape [batch_size, latent_size]
-        :param anneal_function: type on the annealing: either linear, logistic or zero
         :return: tuple of reconstruction loss, KL loss and KL weight
         """
         # cut-off unnecessary padding from target, and flatten
@@ -323,7 +306,7 @@ class PLSentenceVAE(pl.LightningModule):
         nll = torch.nn.NLLLoss(ignore_index=self.pad_idx, reduction='sum')
         nll_loss = nll(logp, target) / self.batch_size
         kl_loss = self.kl_loss_mc(z, mean, log_var)
-        kl_weight = self.kl_anneal_function(anneal_function)
+        kl_weight = self.kl_anneal_function()
 
         return nll_loss, kl_loss, kl_weight
 
@@ -352,8 +335,7 @@ class PLSentenceVAE(pl.LightningModule):
         logp, mean, log_var, z = self.forward(batch['input'], batch['length'])
 
         # loss calculation
-        nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, log_var,
-                                                    'logistic')
+        nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, log_var)
         loss = nll_loss + kl_weight * kl_loss
         self.step += 1
 
@@ -385,8 +367,7 @@ class PLSentenceVAE(pl.LightningModule):
         logp, mean, log_var, z = self.forward(batch['input'], batch['length'])
 
         # loss calculation
-        nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, log_var,
-                                                    'logistic')
+        nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, log_var)
         loss = nll_loss + kl_weight * kl_loss
 
         return {'loss': loss.data, 'NLL loss': nll_loss.data, 'KL loss': kl_loss.data, 'KL weight': kl_weight}
