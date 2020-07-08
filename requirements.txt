@@ -1,1 +1,4 @@
-torch==1.5.0
+nltk==3.5
+numpy==1.19.0
+pytorch-lightning==0.8.4
+torch==1.5.1
