@@ -315,7 +315,7 @@ class PLSentenceVAE(pl.LightningModule):
 
         logp = logp.view(-1, logp.size(2))
 
-        nll = torch.nn.NLLLoss(ignore_index=self.pad_idx, reduction='mean')
+        nll = torch.nn.NLLLoss(ignore_index=self.pad_idx, reduction='sum')
         nll_loss = nll(logp, target)
         kl_loss = self.kl_loss_mc(z, mean, logv)
         kl_weight = self.kl_anneal_function(anneal_function)
@@ -326,7 +326,7 @@ class PLSentenceVAE(pl.LightningModule):
         log_q_z = priors.log_normal_diag(z, mean, logv, dim=1)
         log_p_z = self.prior.log_p_z(z)
 
-        return torch.mean(log_q_z - log_p_z)
+        return torch.sum(log_q_z - log_p_z)
 
     def training_step(self, batch: dict, batch_idx: int) -> dict:
         """
@@ -341,6 +341,8 @@ class PLSentenceVAE(pl.LightningModule):
 
         # loss calculation
         nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, logv, 'logistic')
+        nll_loss /= self.batch_size
+        kl_loss /= self.batch_size
         loss = nll_loss + kl_weight * kl_loss
         self.step += 1
 
@@ -368,6 +370,8 @@ class PLSentenceVAE(pl.LightningModule):
 
         # loss calculation
         nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, logv, 'logistic')
+        nll_loss /= self.batch_size
+        kl_loss /= self.batch_size
         loss = nll_loss + kl_weight * kl_loss
 
         return {'loss': loss.data, 'NLL loss': nll_loss.data, 'KL loss': kl_loss.data, 'KL weight': kl_weight}
@@ -403,9 +407,11 @@ class PLSentenceVAE(pl.LightningModule):
 
 
 # training
-model = PLSentenceVAE(batch_size=256)
+# model = PLSentenceVAE(batch_size=256, hidden_size=191, embedding_size=353, latent_size=13, word_dropout=0.62)
+model = PLSentenceVAE(prior='Vamp', n_components=300, batch_size=256, hidden_size=191, embedding_size=353,
+                      latent_size=13, word_dropout=0.62)
 model.prepare_data()
-trainer = pl.Trainer(max_epochs=15, gpus=1, auto_select_gpus=True)
+trainer = pl.Trainer(max_epochs=20, gpus=1, auto_select_gpus=True)
 trainer.fit(model)
 print('Training ended\n')
 
