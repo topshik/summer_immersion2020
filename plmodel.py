@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Tuple
+from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import pytorch_lightning as pl
@@ -17,7 +17,7 @@ from utils import idx2word, interpolate
 
 class PLSentenceVAE(pl.LightningModule):
     def __init__(self, batch_size: int = 256, vocab_size: int = 9877, max_sequence_length: int = 50,
-                 embedding_size: int = 300, latent_size: int = 96, hidden_size: int = 256, word_dropout: float = 0,
+                 embedding_size: int = 300, latent_size: int = 256, hidden_size: int = 256, word_dropout: float = 0,
                  embedding_dropout: float = 0.5, rnn_type: str = 'gru', num_layers: int = 1,
                  bidirectional: bool = False, prior: str = 'SimpleGaussian', n_components: int = 200,
                  k: int = 0.0025, x0: int = 2500) -> None:
@@ -175,6 +175,8 @@ class PLSentenceVAE(pl.LightningModule):
         # project outputs to vocab
         logp = nn.functional.log_softmax(self.outputs2vocab(padded_outputs.view(-1, padded_outputs.size(2))), dim=-1)
         logp = logp.view(b, s, self.embedding.num_embeddings)
+        # disable <unk> tokens
+        # logp.data[:, :, self.unk_idx] -= 1e12
 
         return logp, mean, logv, z
 
@@ -213,6 +215,8 @@ class PLSentenceVAE(pl.LightningModule):
             input_embedding = self.embedding(input_sequence)
             output, hidden = self.decoder_rnn(input_embedding, hidden)
             logits = self.outputs2vocab(output)
+            # disables <unk> tokens
+            logits.data[:, :, self.unk_idx] -= 1e12
 
             # sample
             _, input_sequence = torch.topk(logits, 1, dim=-1)
@@ -291,6 +295,8 @@ class PLSentenceVAE(pl.LightningModule):
             return float(1 / (1 + np.exp(-self.k * (self.step - self.x0))))
         elif anneal_function == 'linear':
             return min(1., self.step / self.x0)
+        elif anneal_function == 'zero':
+            return 0
 
     def loss_fn(self, z, logp: torch.Tensor, target: torch.Tensor, length: torch.Tensor, mean: torch.Tensor,
                 logv: torch.Tensor, anneal_function: str) -> Tuple[torch.Tensor, torch.Tensor, float]:
@@ -306,17 +312,17 @@ class PLSentenceVAE(pl.LightningModule):
         """
         # cut-off unnecessary padding from target, and flatten
         target = target[:, :torch.max(length).item()].contiguous().view(-1)
+
         logp = logp.view(-1, logp.size(2))
 
         nll = torch.nn.NLLLoss(ignore_index=self.pad_idx, reduction='mean')
         nll_loss = nll(logp, target)
-        # kl_loss = (-0.5 * (1 + logv - mean.pow(2) - logv.exp())).sum(dim=1).mean()
         kl_loss = self.kl_loss_mc(z, mean, logv)
         kl_weight = self.kl_anneal_function(anneal_function)
 
         return nll_loss, kl_loss, kl_weight
 
-    def kl_loss_mc(self, z: torch.Tensor, mean, logv):
+    def kl_loss_mc(self, z: torch.Tensor, mean, logv) -> torch.Tensor:
         log_q_z = priors.log_normal_diag(z, mean, logv, dim=1)
         log_p_z = self.prior.log_p_z(z)
 
@@ -340,6 +346,15 @@ class PLSentenceVAE(pl.LightningModule):
 
         return {'loss': loss, 'NLL loss': nll_loss.data, 'KL loss': kl_loss.data, 'KL weight': kl_weight}
 
+    def training_epoch_end(self, outputs: Union[List[Dict[str, torch.Tensor]], List[List[Dict[str, torch.Tensor]]]]) \
+            -> Dict[str, Dict[str, torch.Tensor]]:
+        avg_elbo = torch.stack([x['loss'] for x in outputs]).mean()
+        avg_nll = torch.stack([x['NLL loss'] for x in outputs]).mean()
+        avg_kl = torch.stack([x['KL loss'] for x in outputs]).mean()
+        tensorboard_logs = {'ELBO (train)': avg_elbo, 'NLL loss (train)': avg_nll, 'KL loss (train)': avg_kl}
+
+        return {'val_loss': avg_elbo, 'NLL loss': avg_nll, 'KL loss': avg_kl, 'log': tensorboard_logs}
+
     def validation_step(self, batch: dict, batch_idx: int) -> dict:
         """
         Perform validation step
@@ -355,9 +370,10 @@ class PLSentenceVAE(pl.LightningModule):
         nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, logv, 'logistic')
         loss = nll_loss + kl_weight * kl_loss
 
-        return {'ELBO': loss.data, 'NLL loss': nll_loss.data, 'KL loss': kl_loss.data, 'KL weight': kl_weight}
+        return {'loss': loss.data, 'NLL loss': nll_loss.data, 'KL loss': kl_loss.data, 'KL weight': kl_weight}
 
-    def validation_epoch_end(self, outputs):
+    def validation_epoch_end(self, outputs: Union[List[Dict[str, torch.Tensor]], List[List[Dict[str, torch.Tensor]]]]) \
+            -> Dict[str, Dict[str, torch.Tensor]]:
         """
         Saves model, logs losses at the end of validation epoch
         :param outputs: list of validation step outputs for all batches
@@ -368,12 +384,13 @@ class PLSentenceVAE(pl.LightningModule):
         checkpoint_path = os.path.join(save_model_path, "E%i.pth" % self.epoch)
         self.epoch += 1
         torch.save(model.state_dict(), checkpoint_path)
-        print("\nModel saved at %s" % checkpoint_path)
+        # print("\nModel saved at %s" % checkpoint_path)
 
-        avg_elbo = torch.stack([x['ELBO'] for x in outputs]).mean()
+        avg_elbo = torch.stack([x['loss'] for x in outputs]).mean()
         avg_nll = torch.stack([x['NLL loss'] for x in outputs]).mean()
         avg_kl = torch.stack([x['KL loss'] for x in outputs]).mean()
-        tensorboard_logs = {'ELBO': avg_elbo, 'NLL loss': avg_nll, 'KL loss': avg_kl}
+        tensorboard_logs = {'ELBO (val)': avg_elbo, 'NLL loss (val)': avg_nll, 'KL loss (val)': avg_kl}
+
         return {'val_loss': avg_elbo, 'NLL loss': avg_nll, 'KL loss': avg_kl, 'log': tensorboard_logs}
 
     def configure_optimizers(self) -> Optimizer:
@@ -386,56 +403,74 @@ class PLSentenceVAE(pl.LightningModule):
 
 
 # training
-# model = PLSentenceVAE(prior='Vamp', n_components=500, batch_size=256)
-# model.prepare_data()
-# n_reconstructions = 10
-# print(idx2word(model.ptb_train[1]))
-
-# trainer = pl.Trainer(max_epochs=10, gpus=1, auto_select_gpus=True)
-# trainer.fit(model)
-# print('Training ended\n')
-
-# TODO: create separate function
-# original_sentences = model.ptb_train[1: 1 + n_reconstructions]
-# original_inputs = {key: torch.tensor(value) for key, value in original_sentences.items()}
-# _, _, _, reconstructions_z = model.forward(original_inputs['input'], original_inputs['length'])
-# samples = model.inference(z=z_in)
-# reconstructs = print(*idx2word(samples, i2w=i2w, pad_idx=w2i['<pad>']), sep='\n')
-# print('----------RECONSTRUCTIONS----------')
-# for i in range(1, n_reconstructions + 1):
+model = PLSentenceVAE(batch_size=256)
+model.prepare_data()
+trainer = pl.Trainer(max_epochs=15, gpus=1, auto_select_gpus=True)
+trainer.fit(model)
+print('Training ended\n')
 
 # inference
-path = 'checkpoints/E11.pth'
-model = PLSentenceVAE(prior='Vamp', n_components=500, batch_size=256)
-model.prepare_data()
-model.load_state_dict(torch.load(path))
-model.cuda()
+# path = 'checkpoints/E40.pth'
+# model = PLSentenceVAE(prior='Vamp', n_components=300, batch_size=256)
+# model.prepare_data()
+# model.load_state_dict(torch.load(path))
+# model.cuda()
+
+
+# path = 'checkpoints/E40.pth'
+# model = PLSentenceVAE(prior='Vamp', n_components=300, batch_size=256)
+# model.load_state_dict(torch.load(path))
+# trainer = pl.Trainer(max_epochs=20, gpus=1, auto_select_gpus=True)
+# trainer.fit(model)
+
+
 
 model.eval()
+model.batch_size = 1
+# TODO: create separate function
 with open('data/ptb.vocab.json', 'r') as file:
     vocab = json.load(file)
 w2i, i2w = vocab['w2i'], vocab['i2w']
-print('----------PSEUDO INPUTS----------')
-idx_list = np.random.choice(np.arange(500), size=20)
-for idx in idx_list:
-    z_in = model.prior.generate_z(1, idx)
-    samples = model.inference(z=z_in)
-    print(idx, ': ', *idx2word(samples, i2w=i2w, pad_idx=w2i['<pad>']), sep='\n', end='\n')
 
-model.eval()
-with open('data/ptb.vocab.json', 'r') as file:
-    vocab = json.load(file)
+n_reconstructions = 15
 
-w2i, i2w = vocab['w2i'], vocab['i2w']
+original_sentences_input = []
+original_sentences_length = []
+original_sentences_target = []
+for i in range(1, 1 + n_reconstructions):
+    original_sentences_input.append(model.ptb_train[i]['input'])
+    original_sentences_length.append(model.ptb_train[i]['length'])
+    original_sentences_target.append(model.ptb_train[i]['target'])
+
+original_sentences_input = torch.tensor(original_sentences_input).type(torch.long)
+original_sentences_length = torch.tensor(original_sentences_length).type(torch.long)
+original_sentences_target = torch.tensor(original_sentences_target).type(torch.long)
+
+logits, _, _, _ = model.forward(original_sentences_input.cuda(), original_sentences_length.cuda())
+samples = torch.max(logits, dim=-1)[1]
+
+print('\n----------RECONSTRUCTIONS----------')
+originals_strings = idx2word(original_sentences_target, i2w=i2w, pad_idx=w2i['<pad>'], eos_idx=w2i['<eos>'])
+reconstructed_strings = idx2word(samples, i2w=i2w, pad_idx=w2i['<pad>'], eos_idx=w2i['<eos>'])
+
+for orig, recon in zip(originals_strings, reconstructed_strings):
+    print('Original: ', orig, '\nReconstructed: ', recon, end='\n\n')
+
+# print('\\----------PSEUDO INPUTS----------')
+# idx_list = np.random.choice(np.arange(500), size=20)
+# for idx in idx_list:
+#     z_in = model.prior.generate_z(1, idx)
+#     samples = model.inference(z=z_in)
+#     print(idx, ': ', *idx2word(samples, i2w=i2w, pad_idx=w2i['<pad>'], eos_idx=w2i['<eos>']), end='\n')
 
 n_samples = 10
 samples = model.inference(batch_size=n_samples)
-print('----------SAMPLES----------')
-print(*idx2word(samples, i2w=i2w, pad_idx=w2i['<pad>']), sep='\n')
+print('\n----------SAMPLES----------')
+print(*idx2word(samples, i2w=i2w, pad_idx=w2i['<pad>'], eos_idx=w2i['<eos>']), sep='\n')
 
 z1 = torch.randn([model.latent_size]).numpy()
 z2 = torch.randn([model.latent_size]).numpy()
 z_in = torch.from_numpy(interpolate(start=z1, end=z2, steps=8)).float().cuda()
 samples = model.inference(z=z_in)
-print('-------INTERPOLATION-------')
-print(*idx2word(samples, i2w=i2w, pad_idx=w2i['<pad>']), sep='\n')
+print('\n-------INTERPOLATION-------')
+print(*idx2word(samples, i2w=i2w, pad_idx=w2i['<pad>'], eos_idx=w2i['<eos>']), sep='\n')
