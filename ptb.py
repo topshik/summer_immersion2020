@@ -9,7 +9,9 @@ from torch.utils.data import Dataset
 
 
 class OrderedCounter(Counter, OrderedDict):
-    """Counter that remembers the order elements are first encountered"""
+    """
+    Counter that remembers the order elements are first encountered
+    """
     def __repr__(self):
         return '%s(%r)' % (self.__class__.__name__, OrderedDict(self))
 
@@ -144,7 +146,6 @@ class PTB(Dataset):
             w2i[st] = len(w2i)
 
         with open(self.raw_data_path, 'r') as file:
-
             for i, line in enumerate(file):
                 words = tokenizer.tokenize(line)
                 w2c.update(words)
