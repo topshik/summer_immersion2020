@@ -1,11 +1,12 @@
 # Dataset parameters
 # -------------------------------------------------------------------------------
-create_data: bool = False
+create_data: False
 data_directory: "data"
 
 # Model parameters
 # -------------------------------------------------------------------------------
 batch_size: 256
+max_epochs: 40
 max_sequence_length: 50
 embedding_size: 300
 hidden_size: 256
@@ -19,6 +20,7 @@ bidirectional: false
 
 # Prior parameters
 # -------------------------------------------------------------------------------
+prior: "SimpleGaussian"
 n_components: 200
 
 
@@ -28,4 +30,4 @@ anneal_function: "const"
 kl_weight: 0.1
 k: 0.05
 x0: null
-kl_zero_epochs: int = 0
+kl_zero_epochs: 0
