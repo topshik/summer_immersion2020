@@ -7,10 +7,10 @@ import plmodel
 from utils import idx2word, interpolate
 
 
-def train(prior: str, n_components: int):
+def train(prior: str, n_components: int, anneal_func: str):
     model = plmodel.PLSentenceVAE(prior=prior, n_components=n_components, batch_size=256, hidden_size=191,
-                                  embedding_size=353, latent_size=13, word_dropout=0.62)
-    trainer = pl.Trainer(max_epochs=13, gpus=1, auto_select_gpus=True)
+                                  embedding_size=353, latent_size=13, word_dropout=0.62, anneal_function=anneal_func)
+    trainer = pl.Trainer(max_epochs=20, gpus=1, auto_select_gpus=True)
     trainer.fit(model)
 
 

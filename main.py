@@ -23,6 +23,8 @@ parser_train = subparsers.add_parser('train', description='Trains the model')
 parser_train.add_argument('-o', '--output', type=str, default='checkpoints', help='directory for model checkpoints')
 parser_train.add_argument('-p', '--prior', type=str, default='SimpleGaussian', help='VAE prior distribution type')
 parser_train.add_argument('-c', '--components', type=int, default=300, help='number of prior components')
+parser_train.add_argument('-a', '--anneal', type=str, default='logistic', help='annealing function type: logistic,' 
+                                                                               'linear or zero')
 
 # Evaluation parser
 parser_eval = subparsers.add_parser('validate', description='Evaluates provided model on validation set')
@@ -36,7 +38,7 @@ if __name__ == '__main__':
     # params = load_yaml(args.config) if args.config else {}
 
     if args.command == 'train':
-        train.train(args.prior, args.components)
+        train.train(args.prior, args.components, args.anneal)
 
     elif args.command == 'validate':
         train.validate(args.model, args.prior, args.components)
