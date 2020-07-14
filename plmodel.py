@@ -18,16 +18,13 @@ class PLSentenceVAE(pl.LightningModule):
                  create_data: bool = False, embedding_size: int = 300, hidden_size: int = 256, latent_size: int = 256,
                  word_dropout: float = 0, embedding_dropout: float = 0.5, rnn_type: str = 'gru', num_layers: int = 1,
                  bidirectional: bool = False, prior: str = 'SimpleGaussian', n_components: int = 200,
-                 anneal_function: str = 'logistic', k: int = 0.0025, x0: int = 2500) -> None:
+                 anneal_function: str = 'logistic', kl_weight: float = 1.0, k: int = 0.0025, x0: int = None,
+                 max_epochs: int = 20, kl_zero_epochs: int = 0) -> None:
         super().__init__()
 
         self.step = 0
-        self.epoch = 1
-
-        # kl annealing params
-        self.anneal_function = anneal_function
-        self.k = k
-        self.x0 = x0
+        self.current_epoch += 1
+        self.max_epochs = max_epochs
 
         # datasets and their params
         self.max_sequence_length = max_sequence_length
@@ -40,6 +37,16 @@ class PLSentenceVAE(pl.LightningModule):
         self.pad_idx = self.ptb_train.pad_idx
         self.unk_idx = self.ptb_train.unk_idx
         self.vocab_size = self.ptb_train.vocab_size
+
+        # kl annealing params
+        self.anneal_function = anneal_function
+        self.kl_weight = kl_weight
+        self.k = k
+        self.kl_zero_epochs = kl_zero_epochs
+        if x0 is None:
+            self.x0 = len(self.ptb_train) * (self.max_epochs - self.kl_zero_epochs)
+        else:
+            self.x0 = x0
 
         # dataloaders
         self.batch_size = batch_size
@@ -254,7 +261,7 @@ class PLSentenceVAE(pl.LightningModule):
     def train_dataloader(self) -> DataLoader:
         """
         Create train dataloader from train dataset
-        :return: pytorh dataloader
+        :return: pytorch dataloader
         """
         train_loader = DataLoader(dataset=self.ptb_train, batch_size=self.batch_size, shuffle=True,
                                   num_workers=4, pin_memory=torch.cuda.is_available(), drop_last=True)
@@ -280,9 +287,11 @@ class PLSentenceVAE(pl.LightningModule):
         if self.anneal_function == 'logistic':
             return float(1 / (1 + np.exp(-self.k * (self.step - self.x0))))
         elif self.anneal_function == 'linear':
-            return min(1., self.step / self.x0)
+            return self.k * min(1., self.step / self.x0)
         elif self.anneal_function == 'zero':
             return 0
+        elif self.anneal_function == 'const':
+            return self.kl_weight
 
     def loss_fn(self, z, logp: torch.Tensor, target: torch.Tensor, length: torch.Tensor, mean: torch.Tensor,
                 log_var: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, float]:
@@ -334,6 +343,8 @@ class PLSentenceVAE(pl.LightningModule):
 
         # loss calculation
         nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, log_var)
+        if self.current_epoch < self.kl_zero_epochs:
+            kl_weight = 0
         loss = nll_loss + kl_weight * kl_loss
         self.step += 1
 
@@ -349,9 +360,10 @@ class PLSentenceVAE(pl.LightningModule):
         avg_elbo = torch.stack([x['loss'] for x in outputs]).mean()
         avg_nll = torch.stack([x['NLL loss'] for x in outputs]).mean()
         avg_kl = torch.stack([x['KL loss'] for x in outputs]).mean()
-        tensorboard_logs = {'ELBO (train)': avg_elbo, 'NLL loss (train)': avg_nll, 'KL loss (train)': avg_kl}
+        tensorboard_logs = {'ELBO (train)': avg_elbo.data, 'NLL loss (train)': avg_nll.data,
+                            'KL loss (train)': avg_kl.data, 'KL weight': outputs[0]['KL weight']}
 
-        return {'val_loss': avg_elbo, 'NLL loss': avg_nll, 'KL loss': avg_kl, 'log': tensorboard_logs}
+        return {'train_loss': avg_elbo, 'log': tensorboard_logs}
 
     def validation_step(self, batch: dict, batch_idx: int) -> dict:
         """
@@ -366,6 +378,8 @@ class PLSentenceVAE(pl.LightningModule):
 
         # loss calculation
         nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, log_var)
+        if self.current_epoch < self.kl_zero_epochs:
+            kl_weight = 0
         loss = nll_loss + kl_weight * kl_loss
 
         return {'loss': loss.data, 'NLL loss': nll_loss.data, 'KL loss': kl_loss.data, 'KL weight': kl_weight}
@@ -379,16 +393,15 @@ class PLSentenceVAE(pl.LightningModule):
         """
         # TODO lightning saving interface
         save_model_path = 'checkpoints'
-        checkpoint_path = os.path.join(save_model_path, "E%i.pth" % self.epoch)
-        self.epoch += 1
+        checkpoint_path = os.path.join(save_model_path, "E%i.pth" % self.current_epoch)
         torch.save(self.state_dict(), checkpoint_path)
 
         avg_elbo = torch.stack([x['loss'] for x in outputs]).mean()
         avg_nll = torch.stack([x['NLL loss'] for x in outputs]).mean()
         avg_kl = torch.stack([x['KL loss'] for x in outputs]).mean()
-        tensorboard_logs = {'ELBO (val)': avg_elbo, 'NLL loss (val)': avg_nll, 'KL loss (val)': avg_kl}
+        tensorboard_logs = {'ELBO (val)': avg_elbo.data, 'NLL loss (val)': avg_nll.data, 'KL loss (val)': avg_kl.data}
 
-        return {'val_loss': avg_elbo, 'NLL loss': avg_nll, 'KL loss': avg_kl, 'log': tensorboard_logs}
+        return {'val_loss': avg_elbo, 'log': tensorboard_logs}
 
     def configure_optimizers(self) -> Optimizer:
         """
