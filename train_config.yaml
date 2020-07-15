@@ -1,6 +1,6 @@
 # Dataset parameters
 # -------------------------------------------------------------------------------
-create_data: False
+create_data: false
 data_directory: "data"
 
 # Model parameters

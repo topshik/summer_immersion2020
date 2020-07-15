@@ -1,4 +1,8 @@
 nltk==3.5
 numpy==1.19.0
-pytorch-lightning==0.8.4
+pytorch-lightning==0.8.5
 torch==1.5.1
+hydra-core==0.11.3
+
+omegaconf>=2.0.0
+argparse>=1.4.0
