@@ -5,7 +5,7 @@ FROM nvidia/cuda:10.2-cudnn7-devel-ubuntu18.04
 # clean the libs list
 RUN apt clean \
  && apt update -qq \
- && apt install software-properties-common \
+ && apt install -y software-properties-common \
  && add-apt-repository ppa:deadsnakes/ppa \
  && apt install -y --no-install-recommends \
     git \
