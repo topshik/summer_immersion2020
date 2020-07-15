@@ -6,7 +6,7 @@ FROM nvidia/cuda:10.2-cudnn7-devel-ubuntu18.04
 RUN apt clean \
  && apt update -qq \
  && apt install software-properties-common \
- && add-apt-repository ppa:deadsnakes/ppa
+ && add-apt-repository ppa:deadsnakes/ppa \
  && apt install -y --no-install-recommends \
     git \
     wget \
@@ -41,10 +41,6 @@ ENV HOME=/home/user
 RUN chmod 777 /home/user
 
 ## Create a Python 3.8 environment.
-RUN /home/user/miniconda/bin/conda install conda-build \
- && /home/user/miniconda/bin/conda create -y --name py36 python=3.6.5 \
- && /home/user/miniconda/bin/conda clean -ya
-
 RUN virtualenv .env --python=python3.8 \
- && . .env/bin/activate
+ && . .env/bin/activate \
  && pip install requirements.txt
