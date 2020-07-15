@@ -28,6 +28,7 @@ RUN apt clean \
     htop \
     p7zip-full \
     python3.8 \
+    python3.8-dev\
     virtualenv
 
 
@@ -44,3 +45,5 @@ COPY requirements.txt /tmp
 RUN virtualenv /home/user/.env --python=python3.8
 RUN . /home/user/.env/bin/activate \
  && pip install -r /tmp/requirements.txt
+
+EXPOSE 6006
