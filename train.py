@@ -7,7 +7,7 @@ import pytorch_lightning as pl
 import plmodel
 
 
-@hydra.main(config_path="train_config.yaml")
+@hydra.main(config_path="train-config.yaml")
 def train(params: DictConfig) -> None:
     os.chdir(hydra.utils.get_original_cwd())
     model = plmodel.PLSentenceVAE(**params)
