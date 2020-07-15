@@ -34,13 +34,13 @@ RUN apt clean \
 # Create a non-root user and switch to it.
 RUN adduser --disabled-password --gecos '' --shell /bin/bash user
 RUN echo "user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-user
-USER user
 
 # All users can use /home/user as their home directory.
 ENV HOME=/home/user
 RUN chmod 777 /home/user
 
 ## Create a Python 3.8 environment.
-RUN virtualenv .env --python=python3.8 \
- && . .env/bin/activate \
- && pip install requirements.txt
+COPY requirements.txt /tmp
+RUN virtualenv /home/user/.env --python=python3.8
+RUN . /home/user/.env/bin/activate \
+ && pip install -r /tmp/requirements.txt
