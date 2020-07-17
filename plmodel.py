@@ -14,23 +14,24 @@ from ptb import PTB
 
 
 class PLSentenceVAE(pl.LightningModule):
-    def __init__(self, batch_size: int = 256, max_sequence_length: int = 50, data_directory: str = 'data',
-                 create_data: bool = False, embedding_size: int = 300, hidden_size: int = 256, latent_size: int = 256,
-                 word_dropout: float = 0, embedding_dropout: float = 0.5, rnn_type: str = 'gru', num_layers: int = 1,
-                 bidirectional: bool = False, prior: str = 'SimpleGaussian', n_components: int = 200,
-                 anneal_function: str = 'logistic', kl_weight: float = 1.0, k: int = 0.0025, x0: int = None,
-                 max_epochs: int = 20, kl_zero_epochs: int = 0) -> None:
+    def __init__(self, config) -> None:
         super().__init__()
 
+        self.config = config
+
         self.step = 0
-        self.current_epoch += 1
-        self.max_epochs = max_epochs
+        self.max_epochs = config.max_epochs
+
+        # logs and dumps
+        self.save_model_path = f"{config.hydra_base_dir}/checkpoints"
+        if not os.path.exists(self.save_model_path):
+            os.makedirs(self.save_model_path)
 
         # datasets and their params
-        self.max_sequence_length = max_sequence_length
-        self.ptb_train = PTB(data_dir=data_directory, split='train', create_data=create_data,
+        self.max_sequence_length = config.max_sequence_length
+        self.ptb_train = PTB(data_dir=config.data_directory, split='train', create_data=config.create_data,
                              max_sequence_length=self.max_sequence_length)
-        self.ptb_val = PTB(data_dir=data_directory, split='valid', create_data=create_data,
+        self.ptb_val = PTB(data_dir=config.data_directory, split='valid', create_data=config.create_data,
                            max_sequence_length=self.max_sequence_length)
         self.sos_idx = self.ptb_train.sos_idx
         self.eos_idx = self.ptb_train.eos_idx
@@ -39,63 +40,63 @@ class PLSentenceVAE(pl.LightningModule):
         self.vocab_size = self.ptb_train.vocab_size
 
         # kl annealing params
-        self.anneal_function = anneal_function
-        self.kl_weight = kl_weight
-        self.k = k
-        self.kl_zero_epochs = kl_zero_epochs
-        if x0 is None:
+        self.anneal_function = config.anneal_function
+        self.kl_weight = config.kl_weight
+        self.k = config.k
+        self.kl_zero_epochs = config.kl_zero_epochs
+        if config.x0 is None:
             self.x0 = len(self.ptb_train) * (self.max_epochs - self.kl_zero_epochs)
         else:
-            self.x0 = x0
+            self.x0 = config.x0
 
         # dataloaders
-        self.batch_size = batch_size
+        self.batch_size = config.batch_size
         self.len_train_loader, self.len_val_loader = 0, 0
 
         # net params and architecture
-        self.rnn_type = rnn_type
-        self.bidirectional = bidirectional
-        self.num_layers = num_layers
-        self.hidden_size = hidden_size
-        self.latent_size = latent_size
+        self.rnn_type = config.rnn_type
+        self.bidirectional = config.bidirectional
+        self.num_layers = config.num_layers
+        self.hidden_size = config.hidden_size
+        self.latent_size = config.latent_size
 
-        if prior == 'SimpleGaussian':
+        if config.prior == 'SimpleGaussian':
             self.prior = priors.SimpleGaussian(torch.device('cuda'), self.latent_size)
-        elif prior == 'MoG':
-            self.prior = priors.MoG(torch.device('cuda'), n_components, self.latent_size)
-        elif prior == 'Vamp':
-            self.n_components = n_components
-            self.prior = priors.Vamp(torch.device('cuda'), n_components, self.latent_size,
-                                     input_size=torch.tensor([max_sequence_length, embedding_size]),
+        elif config.prior == 'MoG':
+            self.prior = priors.MoG(torch.device('cuda'), config.n_components, self.latent_size)
+        elif config.prior == 'Vamp':
+            self.n_components = config.n_components
+            self.prior = priors.Vamp(torch.device('cuda'), config.n_components, self.latent_size,
+                                     input_size=torch.tensor([config.max_sequence_length, config.embedding_size]),
                                      encoder=self.q_z)
         else:
             raise ValueError()
 
-        self.embedding = nn.Embedding(self.vocab_size, embedding_size)
-        self.word_dropout_rate = word_dropout
-        self.embedding_dropout = nn.Dropout(p=embedding_dropout)
+        self.embedding = nn.Embedding(self.vocab_size, config.embedding_size)
+        self.word_dropout_rate = config.word_dropout
+        self.embedding_dropout = nn.Dropout(p=config.embedding_dropout)
 
-        if rnn_type == 'rnn':
+        if config.rnn_type == 'rnn':
             rnn = nn.RNN
-        elif rnn_type == 'gru':
+        elif config.rnn_type == 'gru':
             rnn = nn.GRU
-        elif rnn_type == 'lstm':
+        elif config.rnn_type == 'lstm':
             rnn = nn.LSTM
         else:
             raise ValueError()
 
-        self.encoder_rnn = rnn(embedding_size, hidden_size, num_layers=num_layers, bidirectional=self.bidirectional,
-                               batch_first=True)
+        self.encoder_rnn = rnn(config.embedding_size, config.hidden_size, num_layers=config.num_layers,
+                               bidirectional=self.bidirectional, batch_first=True)
 
-        self.hidden_factor = (2 if bidirectional else 1) * num_layers
-        self.hidden2mean = nn.Linear(hidden_size * self.hidden_factor, latent_size)
-        self.hidden2log_var = nn.Linear(hidden_size * self.hidden_factor, latent_size)
+        self.hidden_factor = (2 if config.bidirectional else 1) * config.num_layers
+        self.hidden2mean = nn.Linear(config.hidden_size * self.hidden_factor, config.latent_size)
+        self.hidden2log_var = nn.Linear(config.hidden_size * self.hidden_factor, config.latent_size)
 
-        self.latent2hidden = nn.Linear(latent_size, hidden_size * self.hidden_factor)
-        self.decoder_rnn = rnn(embedding_size, hidden_size, num_layers=num_layers, bidirectional=self.bidirectional,
-                               batch_first=True)
+        self.latent2hidden = nn.Linear(config.latent_size, config.hidden_size * self.hidden_factor)
+        self.decoder_rnn = rnn(config.embedding_size, config.hidden_size, num_layers=config.num_layers,
+                               bidirectional=self.bidirectional, batch_first=True)
 
-        self.outputs2vocab = nn.Linear(hidden_size * (2 if bidirectional else 1), self.vocab_size)
+        self.outputs2vocab = nn.Linear(config.hidden_size * (2 if config.bidirectional else 1), self.vocab_size)
 
     def q_z(self, input_embedding: torch.Tensor, sorted_lengths: torch.Tensor = None) -> \
             Tuple[torch.Tensor, torch.Tensor]:
@@ -392,14 +393,22 @@ class PLSentenceVAE(pl.LightningModule):
         :return: dict of averaged logs
         """
         # TODO lightning saving interface
-        save_model_path = 'checkpoints'
-        checkpoint_path = os.path.join(save_model_path, "E%i.pth" % self.current_epoch)
+        checkpoint_path = os.path.join(self.save_model_path, "E%i.pth" % self.current_epoch)
         torch.save(self.state_dict(), checkpoint_path)
 
         avg_elbo = torch.stack([x['loss'] for x in outputs]).mean()
         avg_nll = torch.stack([x['NLL loss'] for x in outputs]).mean()
         avg_kl = torch.stack([x['KL loss'] for x in outputs]).mean()
         tensorboard_logs = {'ELBO (val)': avg_elbo.data, 'NLL loss (val)': avg_nll.data, 'KL loss (val)': avg_kl.data}
+
+        # dumps metrics for current launch
+        if self.current_epoch == self.max_epochs - 1:
+            with open(f"{self.config.hydra_base_dir}/metrics.csv", "a") as output:
+                output.write(",".join([str(self.config.max_epochs), str(self.config.kl_zero_epochs),
+                             str(self.config.anneal_function), f"{self.config.kl_weight:.4f}",
+                             f"{avg_kl:.4f}", f"{avg_nll:.4f}", f"{avg_elbo:.4f}",
+                             f"{3.1415926:.4f}", "\n"]))
+            print(f"\nFind logs in file: {self.config.hydra_base_dir}/metrics.csv")
 
         return {'val_loss': avg_elbo, 'log': tensorboard_logs}
 
@@ -410,3 +419,55 @@ class PLSentenceVAE(pl.LightningModule):
         """
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
         return optimizer
+
+    def calculate_elbo_batch(self, samples_input, samples_length, samples_target):
+        """
+        Calculate ELBO for the batch
+        :return: ELBO value
+        """
+        training_batch_size = self.batch_size
+        self.batch_size = len(samples_input)
+
+        samples_input, samples_target = samples_input.to(self.device), samples_target.to(self.device)
+        logp, mean, log_var, z = self.forward(samples_input, samples_length)
+        nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, samples_target, samples_length, mean, log_var)
+        elbo = nll_loss + kl_loss
+        self.batch_size = training_batch_size
+
+        return elbo
+
+    def calculate_likelihood(self, n_importance_samples=3000) -> torch.Tensor:
+        """
+        Calculate NLL via importance sampling
+        :param n_importance_samples: number of samples in Important sampling (per observation)
+        :return: NLL averaged via importance sampling on validation set
+        """
+        n_samples = len(self.ptb_val)
+        likelihood_test = []
+
+        if n_importance_samples <= self.batch_size:
+            n_iterations = 1
+        else:
+            n_iterations = n_importance_samples // self.batch_size
+            n_importance_samples = self.batch_size
+
+        for i in range(n_samples):
+            point_input = torch.from_numpy(self.ptb_val[i]["input"]).unsqueeze(0)
+            point_length = torch.tensor(self.ptb_val[i]["length"])
+            point_target = torch.from_numpy(self.ptb_val[i]["target"]).unsqueeze(0)
+
+            point_input_expanded = point_input.expand(n_importance_samples, point_input.size(1))
+            point_length_expanded = point_length.expand(n_importance_samples)
+            point_target_expanded = point_target.expand(n_importance_samples, point_target.size(1))
+            a = []
+            for j in range(n_iterations):
+                a_tmp = self.calculate_elbo_batch(point_input_expanded, point_length_expanded, point_target_expanded)
+                a.append(-a_tmp.data)
+
+            a = torch.tensor(a).to(self.device)
+            a = a.view(-1, 1)
+            likelihood_x = torch.logsumexp(a, dim=0)
+            likelihood_test.append(likelihood_x - np.log(len(a)))
+
+        likelihood_test = torch.tensor(likelihood_test)
+        return -likelihood_test.mean()
