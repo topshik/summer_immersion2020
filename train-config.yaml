@@ -6,7 +6,7 @@ data_directory: "data"
 # Model parameters
 # -------------------------------------------------------------------------------
 batch_size: 256
-max_epochs: 40
+max_epochs: 35
 max_sequence_length: 50
 embedding_size: 300
 hidden_size: 256
@@ -30,4 +30,4 @@ anneal_function: "const"
 kl_weight: 0.1
 k: 0.05
 x0: null
-kl_zero_epochs: 0
+kl_zero_epochs: 20
