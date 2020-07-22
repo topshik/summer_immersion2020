@@ -45,9 +45,11 @@ class PLSentenceVAE(pl.LightningModule):
         self.k = config.k
         self.kl_zero_epochs = config.kl_zero_epochs
         if config.x0 is None:
-            self.x0 = len(self.ptb_train) * (self.max_epochs - self.kl_zero_epochs)
+            self.x0 = len(self.ptb_train) * (self.max_epochs - self.kl_zero_epochs) // config.batch_size
         else:
             self.x0 = config.x0
+
+        self.config.kl_zero_steps = len(self.ptb_train) * self.kl_zero_epochs // config.batch_size
 
         # dataloaders
         self.batch_size = config.batch_size
@@ -288,7 +290,7 @@ class PLSentenceVAE(pl.LightningModule):
         if self.anneal_function == 'logistic':
             return float(1 / (1 + np.exp(-self.k * (self.step - self.x0))))
         elif self.anneal_function == 'linear':
-            return self.k * min(1., self.step / self.x0)
+            return self.kl_weight * min(1., (self.step - self.config.kl_zero_steps) / self.x0)
         elif self.anneal_function == 'zero':
             return 0
         elif self.anneal_function == 'const':
@@ -407,7 +409,7 @@ class PLSentenceVAE(pl.LightningModule):
                 output.write(",".join([str(self.config.max_epochs), str(self.config.kl_zero_epochs),
                              str(self.config.anneal_function), f"{self.config.kl_weight:.4f}",
                              f"{avg_kl:.4f}", f"{avg_nll:.4f}", f"{avg_elbo:.4f}",
-                             f"{3.1415926:.4f}", "\n"]))
+                             f"{self.calculate_likelihood().item():.4f}", "\n"]))
             print(f"\nFind logs in file: {self.config.hydra_base_dir}/metrics.csv")
 
         return {'val_loss': avg_elbo, 'log': tensorboard_logs}
