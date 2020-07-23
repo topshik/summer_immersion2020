@@ -1,33 +1,62 @@
-# Dataset parameters
+# DATASET
 # -------------------------------------------------------------------------------
-create_data: false
-data_directory: "data"
+dataset:
+  # whether to create dataset for raw files
+  create_data: false
+  # directory with raw files and processed ones
+  data_directory: "data"
+  # maximum sentence length
+  max_sequence_length: 40
 
-# Model parameters
+
+# MODEL
 # -------------------------------------------------------------------------------
-batch_size: 256
-max_epochs: 35
-max_sequence_length: 50
-embedding_size: 300
-hidden_size: 256
-latent_size: 256
-word_dropout: 0.6
-embedding_dropout: 0.5
-rnn_type: "gru"
-num_layers: 1
-bidirectional: false
+model:
+  embedding_size: 300
+  hidden_size: 512
+  latent_size: 16
+  word_dropout_rate: 0.6
+  embedding_dropout: 0.5
+  rnn_type: "gru"
+  num_layers: 1
+  bidirectional: false
 
 
-# Prior parameters
+# TRAINING
 # -------------------------------------------------------------------------------
-prior: "SimpleGaussian"
-n_components: 200
+train:
+  batch_size: 30
+  max_epochs: 1
 
 
-# KL annealing parameters
+# PRIOR DISTRIBUTION
 # -------------------------------------------------------------------------------
-anneal_function: "const"
-kl_weight: 0.1
-k: 0.05
-x0: null
-kl_zero_epochs: 20
+prior:
+  # either SimpleGaussian, MoG or Vamp
+  type: "SimpleGaussian"
+  # number of components for MoG or Vamp
+  n_components: 200
+
+
+# KL ANNEALING
+# -------------------------------------------------------------------------------
+kl:
+  # kl annealing type: either const, linear or logistic
+  anneal_function: "const"
+  # target KL weight
+  weight: 0.1
+  # scaling for annealing function
+  k: 0.0025
+  # number of steps to reach max
+  x0: 2500
+  # number of epochs to keep KL strictly zero
+  zero_epochs: 0
+
+
+# CHECKPOINTS
+# -------------------------------------------------------------------------------
+chkpnt:
+  # base directory
+  checkpoints_dir: "checkpoints"
+  # number of best model to be saved
+  top_k: 1
