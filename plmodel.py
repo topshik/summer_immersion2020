@@ -1,8 +1,8 @@
-import os
 from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import pytorch_lightning as pl
+from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import torch
 import torch.nn as nn
 from torch.optim.optimizer import Optimizer
@@ -17,88 +17,80 @@ class PLSentenceVAE(pl.LightningModule):
     def __init__(self, config) -> None:
         super().__init__()
 
-        self.config = config
-
-        self.step = 0
-        self.max_epochs = config.max_epochs
-
-        # logs and dumps
-        self.save_model_path = f"{config.hydra_base_dir}/checkpoints"
-        if not os.path.exists(self.save_model_path):
-            os.makedirs(self.save_model_path)
-
-        # datasets and their params
-        self.max_sequence_length = config.max_sequence_length
-        self.ptb_train = PTB(data_dir=config.data_directory, split='train', create_data=config.create_data,
-                             max_sequence_length=self.max_sequence_length)
-        self.ptb_val = PTB(data_dir=config.data_directory, split='valid', create_data=config.create_data,
-                           max_sequence_length=self.max_sequence_length)
+        # datasets related attributes
+        self.ptb_train = PTB(data_dir=config.dataset.data_directory,
+                             split="train",
+                             create_data=config.dataset.create_data,
+                             max_sequence_length=config.dataset.max_sequence_length)
+        self.ptb_val = PTB(data_dir=config.dataset.data_directory,
+                           split="valid",
+                           create_data=config.dataset.create_data,
+                           max_sequence_length=config.dataset.max_sequence_length)
         self.sos_idx = self.ptb_train.sos_idx
         self.eos_idx = self.ptb_train.eos_idx
         self.pad_idx = self.ptb_train.pad_idx
         self.unk_idx = self.ptb_train.unk_idx
         self.vocab_size = self.ptb_train.vocab_size
 
-        # kl annealing params
-        self.anneal_function = config.anneal_function
-        self.kl_weight = config.kl_weight
-        self.k = config.k
-        self.kl_zero_epochs = config.kl_zero_epochs
-        if config.x0 is None:
-            self.x0 = len(self.ptb_train) * (self.max_epochs - self.kl_zero_epochs) // config.batch_size
-        else:
-            self.x0 = config.x0
+        # kl annealing
+        if config.kl.x0 is None:
+            config.kl.x0 = len(self.ptb_train) * (config.train.max_epochs -
+                                                  config.kl.zero_epochs) // config.train.batch_size
 
-        self.config.kl_zero_steps = len(self.ptb_train) * self.kl_zero_epochs // config.batch_size
+        config.kl.zero_steps = len(self.ptb_train) * config.kl.zero_epochs // config.train.batch_size
 
         # dataloaders
-        self.batch_size = config.batch_size
         self.len_train_loader, self.len_val_loader = 0, 0
 
-        # net params and architecture
-        self.rnn_type = config.rnn_type
-        self.bidirectional = config.bidirectional
-        self.num_layers = config.num_layers
-        self.hidden_size = config.hidden_size
-        self.latent_size = config.latent_size
+        # logs
+        self.val_avg_elbo = 0
+        self.val_avg_nll = 0
+        self.val_avg_kl = 0
 
-        if config.prior == 'SimpleGaussian':
-            self.prior = priors.SimpleGaussian(torch.device('cuda'), self.latent_size)
-        elif config.prior == 'MoG':
-            self.prior = priors.MoG(torch.device('cuda'), config.n_components, self.latent_size)
-        elif config.prior == 'Vamp':
-            self.n_components = config.n_components
-            self.prior = priors.Vamp(torch.device('cuda'), config.n_components, self.latent_size,
-                                     input_size=torch.tensor([config.max_sequence_length, config.embedding_size]),
+        # model architecture
+        if config.prior.type == "SimpleGaussian":
+            self.prior = priors.SimpleGaussian(torch.device("cuda"), config.model.latent_size)
+        elif config.prior.type == "MoG":
+            self.prior = priors.MoG(torch.device("cuda"), config.prior.n_components, config.model.latent_size)
+        elif config.prior.type == "Vamp":
+            self.prior = priors.Vamp(torch.device("cuda"), config.prior.n_components, config.model.latent_size,
+                                     input_size=torch.tensor([config.dataset.max_sequence_length,
+                                                              config.model.embedding_size]),
                                      encoder=self.q_z)
         else:
             raise ValueError()
 
-        self.embedding = nn.Embedding(self.vocab_size, config.embedding_size)
-        self.word_dropout_rate = config.word_dropout
-        self.embedding_dropout = nn.Dropout(p=config.embedding_dropout)
+        self.embedding = nn.Embedding(self.vocab_size, config.model.embedding_size)
+        self.embedding_dropout = nn.Dropout(p=config.model.embedding_dropout)
 
-        if config.rnn_type == 'rnn':
+        if config.model.rnn_type == "rnn":
             rnn = nn.RNN
-        elif config.rnn_type == 'gru':
+        elif config.model.rnn_type == "gru":
             rnn = nn.GRU
-        elif config.rnn_type == 'lstm':
+        elif config.model.rnn_type == "lstm":
             rnn = nn.LSTM
         else:
             raise ValueError()
 
-        self.encoder_rnn = rnn(config.embedding_size, config.hidden_size, num_layers=config.num_layers,
-                               bidirectional=self.bidirectional, batch_first=True)
+        self.encoder_rnn = rnn(config.model.embedding_size, config.model.hidden_size,
+                               num_layers=config.model.num_layers,
+                               bidirectional=config.model.bidirectional,
+                               batch_first=True)
 
-        self.hidden_factor = (2 if config.bidirectional else 1) * config.num_layers
-        self.hidden2mean = nn.Linear(config.hidden_size * self.hidden_factor, config.latent_size)
-        self.hidden2log_var = nn.Linear(config.hidden_size * self.hidden_factor, config.latent_size)
+        self.hidden_factor = (2 if config.model.bidirectional else 1) * config.model.num_layers
+        self.hidden2mean = nn.Linear(config.model.hidden_size * self.hidden_factor, config.model.latent_size)
+        self.hidden2log_var = nn.Linear(config.model.hidden_size * self.hidden_factor, config.model.latent_size)
+        self.latent2hidden = nn.Linear(config.model.latent_size, config.model.hidden_size * self.hidden_factor)
 
-        self.latent2hidden = nn.Linear(config.latent_size, config.hidden_size * self.hidden_factor)
-        self.decoder_rnn = rnn(config.embedding_size, config.hidden_size, num_layers=config.num_layers,
-                               bidirectional=self.bidirectional, batch_first=True)
+        self.decoder_rnn = rnn(config.model.embedding_size, config.model.hidden_size,
+                               num_layers=config.model.num_layers,
+                               bidirectional=config.model.bidirectional,
+                               batch_first=True)
 
-        self.outputs2vocab = nn.Linear(config.hidden_size * (2 if config.bidirectional else 1), self.vocab_size)
+        self.outputs2vocab = nn.Linear(config.model.hidden_size * (2 if config.model.bidirectional else 1),
+                                       self.vocab_size)
+
+        self.config = config
 
     def q_z(self, input_embedding: torch.Tensor, sorted_lengths: torch.Tensor = None) -> \
             Tuple[torch.Tensor, torch.Tensor]:
@@ -117,13 +109,13 @@ class PLSentenceVAE(pl.LightningModule):
         packed_input = rnn_utils.pack_padded_sequence(input_embedding, sorted_lengths.data.tolist(), batch_first=True)
         _, hidden = self.encoder_rnn(packed_input)
 
-        if self.rnn_type == 'lstm':
+        if self.config.model.rnn_type == "lstm":
             hidden = hidden[0]
 
-        if self.bidirectional or self.num_layers > 1:
+        if self.config.model.bidirectional or self.config.model.num_layers > 1:
             # flatten hidden state
             # possibly incorrect, maybe need to permute
-            hidden = hidden.view(self.batch_size, self.hidden_size * self.hidden_factor)
+            hidden = hidden.view(self.config.train.batch_size, self.config.model.hidden_size * self.hidden_factor)
         else:
             hidden = hidden.squeeze()
 
@@ -153,25 +145,25 @@ class PLSentenceVAE(pl.LightningModule):
         mean, log_var = self.q_z(input_embedding, sorted_lengths)
         std = torch.exp(0.5 * log_var)
 
-        z = torch.randn([self.batch_size, self.latent_size]).to(self.device)
+        z = torch.randn([self.config.train.batch_size, self.config.model.latent_size]).to(self.device)
         z = z * std + mean
 
         # decoder
         hidden = self.latent2hidden(z)
 
-        if self.bidirectional or self.num_layers > 1:
+        if self.config.model.bidirectional or self.config.model.num_layers > 1:
             # unflatten hidden state
-            hidden = hidden.view(self.hidden_factor, self.batch_size, self.hidden_size)
+            hidden = hidden.view(self.hidden_factor, self.config.train.batch_size, self.config.model.hidden_size)
         else:
             hidden = hidden.unsqueeze(0)
 
         # decoder input
-        if self.word_dropout_rate > 0:
+        if self.config.model.word_dropout_rate > 0:
             # randomly replace decoder input with <unk>
             prob = torch.rand(input_sequence.size()).to(self.device)
             prob[(input_sequence.data - self.sos_idx) * (input_sequence.data - self.pad_idx) == 0] = 1
             decoder_input_sequence = input_sequence.clone()
-            decoder_input_sequence[prob < self.word_dropout_rate] = self.unk_idx
+            decoder_input_sequence[prob < self.config.model.word_dropout_rate] = self.unk_idx
             input_embedding = self.embedding(decoder_input_sequence)
 
         input_embedding = self.embedding_dropout(input_embedding)
@@ -210,9 +202,9 @@ class PLSentenceVAE(pl.LightningModule):
 
         hidden = self.latent2hidden(z)
 
-        if self.bidirectional or self.num_layers > 1:
+        if self.config.model.bidirectional or self.config.model.num_layers > 1:
             # unflatten hidden state
-            hidden = hidden.view(self.hidden_factor, batch_size, self.hidden_size)
+            hidden = hidden.view(self.hidden_factor, batch_size, self.config.model.hidden_size)
 
         hidden = hidden.unsqueeze(0)
 
@@ -223,10 +215,11 @@ class PLSentenceVAE(pl.LightningModule):
         # idx of still generating sequences with respect to current loop
         running_seqs = torch.arange(0, batch_size, device=self.device).long()
         # generated_sequenced
-        generations = torch.empty((batch_size, self.max_sequence_length), device=self.device).fill_(self.pad_idx).long()
+        generations = torch.empty((batch_size, self.config.dataset.max_sequence_length),
+                                  device=self.device).fill_(self.pad_idx).long()
 
         input_sequence = torch.empty(batch_size, device=self.device).fill_(self.sos_idx).long()
-        for t in range(self.max_sequence_length):
+        for t in range(self.config.dataset.max_sequence_length):
             input_sequence.unsqueeze_(1)
             input_embedding = self.embedding(input_sequence)
             output, hidden = self.decoder_rnn(input_embedding, hidden)
@@ -266,17 +259,18 @@ class PLSentenceVAE(pl.LightningModule):
         Create train dataloader from train dataset
         :return: pytorch dataloader
         """
-        train_loader = DataLoader(dataset=self.ptb_train, batch_size=self.batch_size, shuffle=True,
+        train_loader = DataLoader(dataset=self.ptb_train, batch_size=self.config.train.batch_size, shuffle=True,
                                   num_workers=4, pin_memory=torch.cuda.is_available(), drop_last=True)
         self.len_train_loader = len(train_loader)
+
         return train_loader
 
     def val_dataloader(self) -> DataLoader:
         """
-        Create train dataloader from train dataset
+        Create validation dataloader from validation dataset
         :return: pytorch dataloader
         """
-        val_loader = DataLoader(dataset=self.ptb_val, batch_size=self.batch_size, num_workers=4,
+        val_loader = DataLoader(dataset=self.ptb_val, batch_size=self.config.train.batch_size, num_workers=4,
                                 pin_memory=torch.cuda.is_available(), drop_last=True)
         self.len_val_loader = len(val_loader)
 
@@ -287,14 +281,15 @@ class PLSentenceVAE(pl.LightningModule):
         Compute current KL divergence coefficient
         :return: coefficient
         """
-        if self.anneal_function == 'logistic':
-            return float(1 / (1 + np.exp(-self.k * (self.step - self.x0))))
-        elif self.anneal_function == 'linear':
-            return self.kl_weight * min(1., (self.step - self.config.kl_zero_steps) / self.x0)
-        elif self.anneal_function == 'zero':
-            return 0
-        elif self.anneal_function == 'const':
-            return self.kl_weight
+        if self.current_epoch < self.config.kl.zero_epochs:
+            return 0.
+
+        if self.config.kl.anneal_function == "logistic":
+            return float(1 / (1 + np.exp(-self.config.kl.k * (self.global_step - self.config.kl.x0))))
+        elif self.config.kl.anneal_function == "linear":
+            return self.config.kl.weight * min(1., (self.global_step - self.config.kl.zero_steps) / self.config.kl.x0)
+        elif self.config.kl.anneal_function == "const":
+            return self.config.kl.weight
 
     def loss_fn(self, z, logp: torch.Tensor, target: torch.Tensor, length: torch.Tensor, mean: torch.Tensor,
                 log_var: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, float]:
@@ -313,8 +308,8 @@ class PLSentenceVAE(pl.LightningModule):
 
         logp = logp.view(-1, logp.size(2))
 
-        nll = torch.nn.NLLLoss(ignore_index=self.pad_idx, reduction='sum')
-        nll_loss = nll(logp, target) / self.batch_size
+        nll = torch.nn.NLLLoss(ignore_index=self.pad_idx, reduction="sum")
+        nll_loss = nll(logp, target) / self.config.train.batch_size
         kl_loss = self.kl_loss_mc(z, mean, log_var)
         kl_weight = self.kl_anneal_function()
 
@@ -342,16 +337,13 @@ class PLSentenceVAE(pl.LightningModule):
         :return: dict with training logs
         """
         # Forward pass
-        logp, mean, log_var, z = self.forward(batch['input'], batch['length'])
+        logp, mean, log_var, z = self.forward(batch["input"], batch["length"])
 
         # loss calculation
-        nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, log_var)
-        if self.current_epoch < self.kl_zero_epochs:
-            kl_weight = 0
+        nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch["target"], batch["length"], mean, log_var)
         loss = nll_loss + kl_weight * kl_loss
-        self.step += 1
 
-        return {'loss': loss, 'NLL loss': nll_loss.data, 'KL loss': kl_loss.data, 'KL weight': kl_weight}
+        return {"loss": loss, "NLL loss": nll_loss.data, "KL loss": kl_loss.data, "KL weight": kl_weight}
 
     def training_epoch_end(self, outputs: Union[List[Dict[str, torch.Tensor]], List[List[Dict[str, torch.Tensor]]]]) \
             -> Dict[str, Dict[str, torch.Tensor]]:
@@ -360,13 +352,13 @@ class PLSentenceVAE(pl.LightningModule):
         :param outputs: list of validation step outputs for all batches
         :return: dict of averaged logs
         """
-        avg_elbo = torch.stack([x['loss'] for x in outputs]).mean()
-        avg_nll = torch.stack([x['NLL loss'] for x in outputs]).mean()
-        avg_kl = torch.stack([x['KL loss'] for x in outputs]).mean()
-        tensorboard_logs = {'ELBO (train)': avg_elbo.data, 'NLL loss (train)': avg_nll.data,
-                            'KL loss (train)': avg_kl.data, 'KL weight': outputs[0]['KL weight']}
+        avg_elbo = torch.stack([x["loss"] for x in outputs]).mean()
+        avg_nll = torch.stack([x["NLL loss"] for x in outputs]).mean()
+        avg_kl = torch.stack([x["KL loss"] for x in outputs]).mean()
+        tensorboard_logs = {"ELBO (train)": avg_elbo.data, "NLL loss (train)": avg_nll.data,
+                            "KL loss (train)": avg_kl.data, "KL weight": outputs[0]["KL weight"]}
 
-        return {'train_loss': avg_elbo, 'log': tensorboard_logs}
+        return {"train_loss": avg_elbo, "log": tensorboard_logs}
 
     def validation_step(self, batch: dict, batch_idx: int) -> dict:
         """
@@ -377,15 +369,15 @@ class PLSentenceVAE(pl.LightningModule):
         :return: dict with training logs
         """
         # Forward pass
-        logp, mean, log_var, z = self.forward(batch['input'], batch['length'])
+        logp, mean, log_var, z = self.forward(batch["input"], batch["length"])
 
         # loss calculation
-        nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch['target'], batch['length'], mean, log_var)
-        if self.current_epoch < self.kl_zero_epochs:
+        nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch["target"], batch["length"], mean, log_var)
+        if self.current_epoch < self.config.kl.zero_epochs:
             kl_weight = 0
         loss = nll_loss + kl_weight * kl_loss
 
-        return {'loss': loss.data, 'NLL loss': nll_loss.data, 'KL loss': kl_loss.data, 'KL weight': kl_weight}
+        return {"loss": loss.data, "NLL loss": nll_loss.data, "KL loss": kl_loss.data, "KL weight": kl_weight}
 
     def validation_epoch_end(self, outputs: Union[List[Dict[str, torch.Tensor]], List[List[Dict[str, torch.Tensor]]]]) \
             -> Dict[str, Dict[str, torch.Tensor]]:
@@ -394,25 +386,16 @@ class PLSentenceVAE(pl.LightningModule):
         :param outputs: list of validation step outputs for all batches
         :return: dict of averaged logs
         """
-        # TODO lightning saving interface
-        checkpoint_path = os.path.join(self.save_model_path, "E%i.pth" % self.current_epoch)
-        torch.save(self.state_dict(), checkpoint_path)
+        avg_elbo = torch.stack([x["loss"] for x in outputs]).mean()
+        avg_nll = torch.stack([x["NLL loss"] for x in outputs]).mean()
+        avg_kl = torch.stack([x["KL loss"] for x in outputs]).mean()
+        tensorboard_logs = {"ELBO (val)": avg_elbo.data, "NLL loss (val)": avg_nll.data, "KL loss (val)": avg_kl.data}
 
-        avg_elbo = torch.stack([x['loss'] for x in outputs]).mean()
-        avg_nll = torch.stack([x['NLL loss'] for x in outputs]).mean()
-        avg_kl = torch.stack([x['KL loss'] for x in outputs]).mean()
-        tensorboard_logs = {'ELBO (val)': avg_elbo.data, 'NLL loss (val)': avg_nll.data, 'KL loss (val)': avg_kl.data}
+        self.val_avg_elbo = avg_elbo
+        self.val_avg_nll = avg_nll
+        self.val_avg_kl = avg_kl
 
-        # dumps metrics for current launch
-        if self.current_epoch == self.max_epochs - 1:
-            with open(f"{self.config.hydra_base_dir}/metrics.csv", "a") as output:
-                output.write(",".join([str(self.config.max_epochs), str(self.config.kl_zero_epochs),
-                             str(self.config.anneal_function), f"{self.config.kl_weight:.4f}",
-                             f"{avg_kl:.4f}", f"{avg_nll:.4f}", f"{avg_elbo:.4f}",
-                             f"{self.calculate_likelihood().item():.4f}", "\n"]))
-            print(f"\nFind logs in file: {self.config.hydra_base_dir}/metrics.csv")
-
-        return {'val_loss': avg_elbo, 'log': tensorboard_logs}
+        return {"val_loss": avg_elbo, "log": tensorboard_logs}
 
     def configure_optimizers(self) -> Optimizer:
         """
@@ -427,18 +410,14 @@ class PLSentenceVAE(pl.LightningModule):
         Calculate ELBO for the batch
         :return: ELBO value
         """
-        training_batch_size = self.batch_size
-        self.batch_size = len(samples_input)
-
         samples_input, samples_target = samples_input.to(self.device), samples_target.to(self.device)
         logp, mean, log_var, z = self.forward(samples_input, samples_length)
         nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, samples_target, samples_length, mean, log_var)
         elbo = nll_loss + kl_loss
-        self.batch_size = training_batch_size
 
         return elbo
 
-    def calculate_likelihood(self, n_importance_samples=3000) -> torch.Tensor:
+    def calculate_likelihood(self, n_importance_samples=300) -> torch.Tensor:
         """
         Calculate NLL via importance sampling
         :param n_importance_samples: number of samples in Important sampling (per observation)
@@ -447,11 +426,11 @@ class PLSentenceVAE(pl.LightningModule):
         n_samples = len(self.ptb_val)
         likelihood_test = []
 
-        if n_importance_samples <= self.batch_size:
+        if n_importance_samples <= self.config.train.batch_size:
             n_iterations = 1
         else:
-            n_iterations = n_importance_samples // self.batch_size
-            n_importance_samples = self.batch_size
+            n_iterations = n_importance_samples // self.config.train.batch_size
+            n_importance_samples = self.config.train.batch_size
 
         for i in range(n_samples):
             point_input = torch.from_numpy(self.ptb_val[i]["input"]).unsqueeze(0)
@@ -461,15 +440,38 @@ class PLSentenceVAE(pl.LightningModule):
             point_input_expanded = point_input.expand(n_importance_samples, point_input.size(1))
             point_length_expanded = point_length.expand(n_importance_samples)
             point_target_expanded = point_target.expand(n_importance_samples, point_target.size(1))
-            a = []
+            elbo_for_sample = torch.zeros(n_iterations).to(self.device)
             for j in range(n_iterations):
-                a_tmp = self.calculate_elbo_batch(point_input_expanded, point_length_expanded, point_target_expanded)
-                a.append(-a_tmp.data)
+                elbo_for_sample[j] = (-self.calculate_elbo_batch(point_input_expanded,
+                                                                 point_length_expanded,
+                                                                 point_target_expanded).data)
 
-            a = torch.tensor(a).to(self.device)
-            a = a.view(-1, 1)
-            likelihood_x = torch.logsumexp(a, dim=0)
-            likelihood_test.append(likelihood_x - np.log(len(a)))
+            likelihood_x = torch.logsumexp(elbo_for_sample, dim=0)
+            likelihood_test.append(likelihood_x - np.log(len(elbo_for_sample)))
 
         likelihood_test = torch.tensor(likelihood_test)
+
         return -likelihood_test.mean()
+
+
+class ValLossEarlyStopping(EarlyStopping):
+    def __init__(self, *args, **kwargs) -> None:
+        """
+        Wrapper for default callback that logs NLL when training is stopped
+        """
+        super().__init__(*args, **kwargs)
+
+    def on_validation_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        self._run_early_stopping_check(trainer, pl_module)
+        if getattr(trainer, "should_stop") or pl_module.current_epoch == pl_module.config.train.max_epochs - 1:
+            # dumps metrics for current launch
+            with open(f"{pl_module.config.hydra_base_dir}/metrics.csv", "a") as output:
+                output.write(",".join([str(pl_module.config.train.max_epochs),
+                                       str(pl_module.config.kl.zero_epochs),
+                                       str(pl_module.config.anneal_function),
+                                       f"{pl_module.config.kl.weight:.4f}",
+                                       f"{pl_module.val_avg_kl:.4f}",
+                                       f"{pl_module.val_avg_nll:.4f}",
+                                       f"{pl_module.val_avg_elbo:.4f}",
+                                       f"{pl_module.calculate_likelihood().item():.4f}", "\n"]))
+            print(f"\nFind logs in file: {pl_module.config.hydra_base_dir}/metrics.csv")
