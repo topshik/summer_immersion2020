@@ -285,7 +285,8 @@ class PLSentenceVAE(pl.LightningModule):
             return 0.
 
         if self.config.kl.anneal_function == "logistic":
-            return float(1 / (1 + np.exp(-self.config.kl.k * (self.global_step - self.config.kl.x0))))
+            return self.config.kl.weight * float(1 / (1 + np.exp(-self.config.kl.k *
+                                                                 (self.global_step - self.config.kl.x0))))
         elif self.config.kl.anneal_function == "linear":
             return self.config.kl.weight * min(1., (self.global_step - self.config.kl.zero_steps) / self.config.kl.x0)
         elif self.config.kl.anneal_function == "const":
@@ -373,9 +374,7 @@ class PLSentenceVAE(pl.LightningModule):
 
         # loss calculation
         nll_loss, kl_loss, kl_weight = self.loss_fn(z, logp, batch["target"], batch["length"], mean, log_var)
-        if self.current_epoch < self.config.kl.zero_epochs:
-            kl_weight = 0
-        loss = nll_loss + kl_weight * kl_loss
+        loss = nll_loss + kl_loss
 
         return {"loss": loss.data, "NLL loss": nll_loss.data, "KL loss": kl_loss.data, "KL weight": kl_weight}
 
@@ -424,7 +423,7 @@ class PLSentenceVAE(pl.LightningModule):
         :return: NLL averaged via importance sampling on validation set
         """
         n_samples = len(self.ptb_val)
-        likelihood_test = []
+        likelihood_test = torch.zeros(n_samples).to(self.device)
 
         if n_importance_samples <= self.config.train.batch_size:
             n_iterations = 1
@@ -447,9 +446,7 @@ class PLSentenceVAE(pl.LightningModule):
                                                                  point_target_expanded).data)
 
             likelihood_x = torch.logsumexp(elbo_for_sample, dim=0)
-            likelihood_test.append(likelihood_x - np.log(len(elbo_for_sample)))
-
-        likelihood_test = torch.tensor(likelihood_test)
+            likelihood_test[i] = likelihood_x - np.log(len(elbo_for_sample))
 
         return -likelihood_test.mean()
 
@@ -466,9 +463,10 @@ class ValLossEarlyStopping(EarlyStopping):
         if getattr(trainer, "should_stop") or pl_module.current_epoch == pl_module.config.train.max_epochs - 1:
             # dumps metrics for current launch
             with open(f"{pl_module.config.hydra_base_dir}/metrics.csv", "a") as output:
-                output.write(",".join([str(pl_module.config.train.max_epochs),
+                output.write(",".join([pl_module.config.prior.type,
+                                       str(pl_module.config.train.max_epochs),
                                        str(pl_module.config.kl.zero_epochs),
-                                       str(pl_module.config.anneal_function),
+                                       str(pl_module.config.kl.anneal_function),
                                        f"{pl_module.config.kl.weight:.4f}",
                                        f"{pl_module.val_avg_kl:.4f}",
                                        f"{pl_module.val_avg_nll:.4f}",
