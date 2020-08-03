@@ -1,8 +1,10 @@
 from typing import Dict, List, Tuple, Union
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+import scipy
 import torch
 import torch.nn as nn
 from torch.optim.optimizer import Optimizer
@@ -452,15 +454,24 @@ class PLSentenceVAE(pl.LightningModule):
 
 
 class ValLossEarlyStopping(EarlyStopping):
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, version, *args, **kwargs) -> None:
         """
         Wrapper for default callback that logs NLL when training is stopped
         """
         super().__init__(*args, **kwargs)
+        self.version = version
 
     def on_validation_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
         self._run_early_stopping_check(trainer, pl_module)
         if getattr(trainer, "should_stop") or pl_module.current_epoch == pl_module.config.train.max_epochs - 1:
+            if isinstance(pl_module.prior, priors.MoG):
+                means = torch.from_numpy(pl_module.prior.mog_mu.cpu().squeeze(0))
+                dist_mat = scipy.spatial.distance.squareform(scipy.spatial.distance.pdist(means))
+                plt.pcolormesh(dist_mat)
+                plt.colorbar()
+                plt.xlim([0, pl_module.config.prior.n_components])
+                plt.ylim([0, pl_module.config.prior.n_components])
+                plt.savefig(f"version_{self.version}_pdist_matrix.png")
             # dumps metrics for current launch
             with open(f"{pl_module.config.hydra_base_dir}/metrics.csv", "a") as output:
                 output.write(",".join([pl_module.config.prior.type,
@@ -473,3 +484,5 @@ class ValLossEarlyStopping(EarlyStopping):
                                        f"{pl_module.val_avg_elbo:.4f}",
                                        f"{pl_module.calculate_likelihood().item():.4f}", "\n"]))
             print(f"\nFind logs in file: {pl_module.config.hydra_base_dir}/metrics.csv")
+
+
