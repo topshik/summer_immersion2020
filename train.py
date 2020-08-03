@@ -1,4 +1,5 @@
 import os
+import shutil
 
 import hydra
 import numpy as np
@@ -14,6 +15,9 @@ def train(config: DictConfig) -> None:
     config.hydra_base_dir = os.getcwd()
     os.chdir(hydra.utils.get_original_cwd())
 
+    # save config near the results
+    shutil.copy2("train-config.yaml", os.path.join(config.hydra_base_dir, "train-config.yaml"))
+
     with open(f"{config.hydra_base_dir}/metrics.csv", "w") as output:
         output.write("version,prior,epochs number,zero KL epochs number,KL mode,KL beta value,KL,NLL,ELBO,"
                      "NLL (importance sampling)\n")
@@ -23,7 +27,7 @@ def train(config: DictConfig) -> None:
     print(f"Starting from version: {start_version}")
     print(f"Writing logs to file {config.hydra_base_dir}/metrics.csv")
 
-    beta_space = np.linspace(0.5, 10, 10)
+    beta_space = np.linspace(0.5, 10, 5)
     modes_space = ["logistic"]
     priors = ["SimpleGaussian", "MoG"]
 
