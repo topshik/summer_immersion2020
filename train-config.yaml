@@ -35,7 +35,7 @@ prior:
   # either SimpleGaussian, MoG or Vamp
   type: "SimpleGaussian"
   # number of components for MoG or Vamp
-  n_components: 200
+  n_components: 100
 
 
 # KL ANNEALING
