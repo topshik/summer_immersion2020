@@ -22,7 +22,11 @@ def train(config: DictConfig) -> None:
         output.write("version,prior,epochs number,zero KL epochs number,KL mode,KL beta value,KL,NLL,ELBO,"
                      "NLL (importance sampling)\n")
 
-    start_version = max(map(int, [name.split('_')[1] for name in os.listdir("lightning_logs")])) + 1
+    if os.path.exists("lightning_logs"):
+        start_version = max(map(int, [name.split('_')[1] for name in os.listdir("lightning_logs")])) + 1
+    else:
+        start_version = 0
+
     current_version = start_version
     print(f"Starting from version: {start_version}")
     print(f"Writing logs to file {config.hydra_base_dir}/metrics.csv")
@@ -52,7 +56,10 @@ def train(config: DictConfig) -> None:
                 trainer = pl.Trainer(max_epochs=config.train.max_epochs,
                                      gpus=1,
                                      auto_select_gpus=True,
-                                     early_stop_callback=plmodel.ValLossEarlyStopping(patience=1, min_delta=0.1),
+                                     early_stop_callback=plmodel.ValLossEarlyStopping(
+                                         version=current_version,
+                                         patience=1,
+                                         min_delta=0.1),
                                      checkpoint_callback=checkpoint_callback)
                 trainer.fit(model)
 
