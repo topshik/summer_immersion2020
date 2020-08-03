@@ -465,7 +465,7 @@ class ValLossEarlyStopping(EarlyStopping):
         self._run_early_stopping_check(trainer, pl_module)
         if getattr(trainer, "should_stop") or pl_module.current_epoch == pl_module.config.train.max_epochs - 1:
             if isinstance(pl_module.prior, priors.MoG):
-                means = torch.from_numpy(pl_module.prior.mog_mu.cpu().squeeze(0))
+                means = pl_module.prior.mog_mu.cpu().detach().numpy()[0]
                 dist_mat = scipy.spatial.distance.squareform(scipy.spatial.distance.pdist(means))
                 plt.pcolormesh(dist_mat)
                 plt.colorbar()
