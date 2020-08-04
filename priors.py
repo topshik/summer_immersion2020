@@ -22,15 +22,13 @@ def log_normal_diag(z: torch.Tensor, mean: torch.Tensor, log_var: torch.Tensor, 
     return log_normal.sum(dim=dim)
 
 
-class Prior:
-    # TODO: manage devices and latent_size
-    def __init__(self, device: torch.device, latent_size: int) -> None:
+class Prior(torch.nn.Module):
+    def __init__(self, latent_size: int) -> None:
         """
-        Prior disturb
-        :param device: computing device
+        Prior distribution
         :param latent_size: latent representation size
         """
-        self.device = device
+        super().__init__()
         self.latent_size = latent_size
 
     def log_p_z(self, z: torch.Tensor) -> torch.Tensor:
@@ -51,10 +49,11 @@ class Prior:
 
 
 class SimpleGaussian(Prior):
-    def __init__(self, device: torch.device, latent_size: int) -> None:
-        super().__init__(device, latent_size)
+    def __init__(self, latent_size: int) -> None:
+        super().__init__(latent_size)
 
     def log_p_z(self, z: torch.Tensor) -> torch.Tensor:
+
         return - 0.5 * (math.log(2 * math.pi) + z.pow(2)).sum(dim=1)
 
     def generate_z(self, batch_size: int) -> torch.Tensor:
@@ -64,15 +63,15 @@ class SimpleGaussian(Prior):
 
 
 class MoG(Prior):
-    def __init__(self, device: torch.device, num_comp: int, latent_size: int) -> None:
-        super().__init__(device, latent_size)
+    def __init__(self, num_comp: int, latent_size: int) -> None:
+        super().__init__(latent_size)
         self.num_comp = num_comp
-        self.mog_mu = nn.Parameter(torch.FloatTensor(1, self.num_comp, self.latent_size)).to(self.device)
-        self.mog_log_var = nn.Parameter(torch.FloatTensor(1, self.num_comp, self.latent_size)).to(self.device)
+        self.mog_mu = nn.Parameter(torch.FloatTensor(1, self.num_comp, self.latent_size))
+        self.mog_log_var = nn.Parameter(torch.FloatTensor(1, self.num_comp, self.latent_size))
 
         # init components
-        self.mog_mu.data.normal_(0, 0.5)
-        self.mog_log_var.data.fill_(-2)
+        self.mog_mu.data.normal_(0, 1.)
+        self.mog_log_var.data.fill_(-4)
 
     def log_p_z(self, z: torch.Tensor) -> torch.Tensor:
         z_expand = z.unsqueeze(1)
@@ -84,7 +83,7 @@ class MoG(Prior):
 
     def generate_z(self, batch_size: int) -> torch.Tensor:
         mixture_idx = np.random.choice(self.mog_mu.shape[1], size=batch_size, replace=True)
-        z = torch.randn([batch_size, self.latent_size]).to(self.device)
+        z = torch.randn([batch_size, self.latent_size])
         z *= self.mog_log_var.data[0, mixture_idx].exp()
         z += self.mog_mu[0, mixture_idx]
 
@@ -92,7 +91,7 @@ class MoG(Prior):
 
 
 class Vamp(Prior):
-    def __init__(self, device: torch.device, n_components: int, latent_size: int, input_size: torch.Tensor,
+    def __init__(self, n_components: int, latent_size: int, input_size: torch.Tensor,
                  encoder: Callable[[torch.Tensor, Optional[torch.Tensor]], Tuple[torch.Tensor, torch.Tensor]]) -> None:
         """
         Variational mixture of posteriors prior
@@ -101,7 +100,7 @@ class Vamp(Prior):
         :param input_size: [max_sequence_length, embedding_size] for generating pseudoinputs
         :param encoder: callable object, which maps inputs to parameters of the variational posterior
         """
-        super().__init__(device, latent_size)
+        super().__init__(latent_size)
         self.n_components = n_components
         self.input_size = input_size
         self.encoder = encoder
@@ -113,11 +112,11 @@ class Vamp(Prior):
 
         # learnable input parameters
         self.means = nn.Sequential(nn.Linear(self.n_components, self.input_size.prod().item(), bias=False),
-                                   nn.Hardtanh(min_val=-max_input_value, max_val=max_input_value)).to(self.device)
+                                   nn.Hardtanh(min_val=-max_input_value, max_val=max_input_value))
         self.means[0].weight.data.normal_(self.pseudoinputs_mean, self.pseudoinputs_std)
 
         self.idle_input = nn.Parameter(torch.eye(self.n_components, self.n_components),
-                                       requires_grad=False).to(self.device)
+                                       requires_grad=False)
 
     def log_p_z(self, z: torch.Tensor) -> torch.Tensor:
         # components_num x input_size
@@ -139,7 +138,7 @@ class Vamp(Prior):
         # batch_size x inp_dim
         means = self.means(self.idle_input[idx]).reshape(torch.Size([batch_size]) + torch.Size(self.input_size))
         z_sample_gen_mean, z_sample_gen_log_var = self.encoder(means)  # batch_size x latent_size
-        z = torch.randn([batch_size, self.latent_size]).to(self.device)
+        z = torch.randn([batch_size, self.latent_size])
         z *= z_sample_gen_log_var.data.exp()
         z += z_sample_gen_mean.data
 
