@@ -88,13 +88,12 @@ class ValLossEarlyStopping(EarlyStopping):
                 means = pl_module.prior.mog_mu.cpu().detach().numpy()[0]
                 dist_mat = scipy.spatial.distance.squareform(scipy.spatial.distance.pdist(means))
                 reordered_dist_mat = compute_serial_matrix(dist_mat)[0]
-                figure, axes = plt.subplots(figsize=(16, 9))
-                cbar_ax = figure.add_axes([1., 0.15, 0.05, 0.7])
+                figure, axes = plt.subplots(figsize=(10, 10))
+                cbar_ax = figure.add_axes([.9, 0.15, 0.05, 0.7])
                 figure.colorbar(axes.pcolormesh(reordered_dist_mat), cbar_ax)
-                axes.xlim([0, pl_module.config.prior.n_components])
-                axes.ylim([0, pl_module.config.prior.n_components])
-                figure.savefig(os.path.join(pl_module.config.hydra_base_dir,
-                                            f"version_{self.version}_pdist_matrix.png"))
+                plt.xlim([0, np.max(reordered_dist_mat)])
+                plt.ylim([0, np.max(reordered_dist_mat)])
+                plt.savefig(os.path.join(pl_module.config.hydra_base_dir, f"version_{self.version}_pdist_matrix.png"))
 
             # dumps metrics for current launch
             with open(f"{pl_module.config.hydra_base_dir}/metrics.csv", "a") as output:
