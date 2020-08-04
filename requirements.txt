@@ -3,8 +3,12 @@ hydra-core==0.11.3
 omegaconf==1.4
 
 nltk==3.5
-numpy==1.19.0
+numpy==1.19.1
 pytorch-lightning==0.8.5
 tensorboardx==2.1
-wandb==0.9.3
-torch==1.5.1
+wandb==0.9.4
+torch==1.6.0
+
+fastcluster>=1.1.26
+scipy>=1.5.2
+matplotlib>=3.3.0
