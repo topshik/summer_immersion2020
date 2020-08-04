@@ -1,10 +1,7 @@
 from typing import Dict, List, Tuple, Union
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-import scipy
 import torch
 import torch.nn as nn
 from torch.optim.optimizer import Optimizer
@@ -51,11 +48,11 @@ class PLSentenceVAE(pl.LightningModule):
 
         # model architecture
         if config.prior.type == "SimpleGaussian":
-            self.prior = priors.SimpleGaussian(torch.device("cuda"), config.model.latent_size)
+            self.prior = priors.SimpleGaussian(config.model.latent_size)
         elif config.prior.type == "MoG":
-            self.prior = priors.MoG(torch.device("cuda"), config.prior.n_components, config.model.latent_size)
+            self.prior = priors.MoG(config.prior.n_components, config.model.latent_size)
         elif config.prior.type == "Vamp":
-            self.prior = priors.Vamp(torch.device("cuda"), config.prior.n_components, config.model.latent_size,
+            self.prior = priors.Vamp(config.prior.n_components, config.model.latent_size,
                                      input_size=torch.tensor([config.dataset.max_sequence_length,
                                                               config.model.embedding_size]),
                                      encoder=self.q_z)
@@ -74,20 +71,24 @@ class PLSentenceVAE(pl.LightningModule):
         else:
             raise ValueError()
 
-        self.encoder_rnn = rnn(config.model.embedding_size, config.model.hidden_size,
-                               num_layers=config.model.num_layers,
-                               bidirectional=config.model.bidirectional,
-                               batch_first=True)
+        self.encoder_rnn = rnn(
+            config.model.embedding_size, config.model.hidden_size,
+            num_layers=config.model.num_layers,
+            bidirectional=config.model.bidirectional,
+            batch_first=True
+        )
 
         self.hidden_factor = (2 if config.model.bidirectional else 1) * config.model.num_layers
         self.hidden2mean = nn.Linear(config.model.hidden_size * self.hidden_factor, config.model.latent_size)
         self.hidden2log_var = nn.Linear(config.model.hidden_size * self.hidden_factor, config.model.latent_size)
         self.latent2hidden = nn.Linear(config.model.latent_size, config.model.hidden_size * self.hidden_factor)
 
-        self.decoder_rnn = rnn(config.model.embedding_size, config.model.hidden_size,
-                               num_layers=config.model.num_layers,
-                               bidirectional=config.model.bidirectional,
-                               batch_first=True)
+        self.decoder_rnn = rnn(
+            config.model.embedding_size, config.model.hidden_size,
+            num_layers=config.model.num_layers,
+            bidirectional=config.model.bidirectional,
+            batch_first=True
+        )
 
         self.outputs2vocab = nn.Linear(config.model.hidden_size * (2 if config.model.bidirectional else 1),
                                        self.vocab_size)
@@ -451,38 +452,3 @@ class PLSentenceVAE(pl.LightningModule):
             likelihood_test[i] = likelihood_x - np.log(len(elbo_for_sample))
 
         return -likelihood_test.mean()
-
-
-class ValLossEarlyStopping(EarlyStopping):
-    def __init__(self, version, *args, **kwargs) -> None:
-        """
-        Wrapper for default callback that logs NLL when training is stopped
-        """
-        super().__init__(*args, **kwargs)
-        self.version = version
-
-    def on_validation_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
-        self._run_early_stopping_check(trainer, pl_module)
-        if getattr(trainer, "should_stop") or pl_module.current_epoch == pl_module.config.train.max_epochs - 1:
-            if isinstance(pl_module.prior, priors.MoG):
-                means = pl_module.prior.mog_mu.cpu().detach().numpy()[0]
-                dist_mat = scipy.spatial.distance.squareform(scipy.spatial.distance.pdist(means))
-                plt.pcolormesh(dist_mat)
-                plt.colorbar()
-                plt.xlim([0, pl_module.config.prior.n_components])
-                plt.ylim([0, pl_module.config.prior.n_components])
-                plt.savefig(f"version_{self.version}_pdist_matrix.png")
-            # dumps metrics for current launch
-            with open(f"{pl_module.config.hydra_base_dir}/metrics.csv", "a") as output:
-                output.write(",".join([pl_module.config.prior.type,
-                                       str(pl_module.config.train.max_epochs),
-                                       str(pl_module.config.kl.zero_epochs),
-                                       str(pl_module.config.kl.anneal_function),
-                                       f"{pl_module.config.kl.weight:.4f}",
-                                       f"{pl_module.val_avg_kl:.4f}",
-                                       f"{pl_module.val_avg_nll:.4f}",
-                                       f"{pl_module.val_avg_elbo:.4f}",
-                                       f"{pl_module.calculate_likelihood().item():.4f}", "\n"]))
-            print(f"\nFind logs in file: {pl_module.config.hydra_base_dir}/metrics.csv")
-
-
