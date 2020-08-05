@@ -107,7 +107,7 @@ class PLSentenceVAE(pl.LightningModule):
                  tensors of shapes [batch_size x latent_size]
         """
         if sorted_lengths is None:
-            sorted_lengths = torch.ones(input_embedding.shape[0]) * self.max_sequence_length
+            sorted_lengths = torch.ones(input_embedding.shape[0]) * self.config.dataset.max_sequence_length
 
         packed_input = rnn_utils.pack_padded_sequence(input_embedding, sorted_lengths.data.tolist(), batch_first=True)
         _, hidden = self.encoder_rnn(packed_input)
