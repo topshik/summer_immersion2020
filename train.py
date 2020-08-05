@@ -55,7 +55,7 @@ def train(config: DictConfig) -> None:
                     monitor="val_loss",
                     mode="min",
                 )
-                trainer = pl.Trainer(max_epochs=1,
+                trainer = pl.Trainer(max_epochs=config.train.max_epochs,
                                      gpus=1,
                                      auto_select_gpus=True,
                                      early_stop_callback=utils.ValLossEarlyStopping(
