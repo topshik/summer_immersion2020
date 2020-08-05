@@ -65,9 +65,9 @@ class SimpleGaussian(Prior):
 class MoG(Prior):
     def __init__(self, num_comp: int, latent_size: int) -> None:
         super().__init__(latent_size)
-        self.num_comp = num_comp
-        self.mog_mu = nn.Parameter(torch.FloatTensor(1, self.num_comp, self.latent_size))
-        self.mog_log_var = nn.Parameter(torch.FloatTensor(1, self.num_comp, self.latent_size))
+        self.n_components = num_comp
+        self.mog_mu = nn.Parameter(torch.FloatTensor(1, self.n_components, self.latent_size))
+        self.mog_log_var = nn.Parameter(torch.FloatTensor(1, self.n_components, self.latent_size))
 
         # init components
         self.mog_mu.data.normal_(0, 1.)
@@ -76,16 +76,17 @@ class MoG(Prior):
     def log_p_z(self, z: torch.Tensor) -> torch.Tensor:
         z_expand = z.unsqueeze(1)
         log_comps = log_normal_diag(z_expand, self.mog_mu, self.mog_log_var, dim=2)  # batch_size x components_num
-        log_comps -= math.log(self.num_comp)
+        log_comps -= math.log(self.n_components)
         log_prior = torch.logsumexp(log_comps, 1)
 
         return log_prior
 
-    def generate_z(self, batch_size: int) -> torch.Tensor:
-        mixture_idx = np.random.choice(self.mog_mu.shape[1], size=batch_size, replace=True)
+    def generate_z(self, batch_size: int, idx: int = None) -> torch.Tensor:
+        if idx is None:
+            idx = np.random.choice(self.n_components, size=batch_size, replace=True)
         z = torch.randn([batch_size, self.latent_size])
-        z *= self.mog_log_var.data[0, mixture_idx].exp()
-        z += self.mog_mu[0, mixture_idx]
+        z *= self.mog_log_var.data[0, idx].exp()
+        z += self.mog_mu[0, idx]
 
         return z
 
