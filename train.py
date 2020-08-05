@@ -9,6 +9,7 @@ import pytorch_lightning as pl
 import plmodel
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 import utils
+from validate import validate
 
 
 @hydra.main(config_path="train-config.yaml", strict=False)
@@ -34,7 +35,7 @@ def train(config: DictConfig) -> None:
 
     beta_space = np.linspace(0.5, 10, 5)
     modes_space = ["logistic"]
-    priors = ["MoG"]
+    priors = ["MoG", "Vamp"]
 
     for beta in beta_space:
         for mode in modes_space:
@@ -54,7 +55,7 @@ def train(config: DictConfig) -> None:
                     monitor="val_loss",
                     mode="min",
                 )
-                trainer = pl.Trainer(max_epochs=config.train.max_epochs,
+                trainer = pl.Trainer(max_epochs=1,
                                      gpus=1,
                                      auto_select_gpus=True,
                                      early_stop_callback=utils.ValLossEarlyStopping(
@@ -63,6 +64,9 @@ def train(config: DictConfig) -> None:
                                          min_delta=0.1),
                                      checkpoint_callback=checkpoint_callback)
                 trainer.fit(model)
+
+                with open(f"{config.hydra_base_dir}/{current_version}_samples.txt", "w") as output:
+                    validate(model, output)
 
                 current_version += 1
 
