@@ -29,7 +29,7 @@ def idx2word(idx: torch.tensor, i2w: Callable, pad_idx: int, eos_idx: int) -> to
 def interpolate(start: np.array, end: np.array, steps: int) -> np.array:
     interpolation = np.zeros((start.shape[0], steps + 2))
     for dim, (s, e) in enumerate(zip(start, end)):
-        interpolation[dim] = np.linspace(s, e, steps+2)
+        interpolation[dim] = np.linspace(s, e, steps + 2)
 
     return interpolation.T
 
