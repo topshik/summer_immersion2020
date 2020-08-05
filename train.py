@@ -48,11 +48,11 @@ def train(config: DictConfig) -> None:
 
                 model = plmodel.PLSentenceVAE(config)
                 checkpoint_callback = ModelCheckpoint(
+                    filepath="/".join([config.hydra_base_dir, f"{current_version}_" + "{epoch}-{val_loss:.2f}"]),
                     save_top_k=(config.chkpnt.top_k if config.chkpnt.top_k != -1 else config.train.max_epochs),
                     verbose=True,
                     monitor="val_loss",
                     mode="min",
-                    prefix=f"version_{current_version}_"
                 )
                 trainer = pl.Trainer(max_epochs=config.train.max_epochs,
                                      gpus=1,
