@@ -42,7 +42,7 @@ All training parameters are stored in the `train-config.yaml` file, so you can e
 python train.py
 ```
 
-Checkpoint for each epoch will be saved in the `checkpoints` directory. 
+Checkpoints, config file and different output data are stored in the `outputs/script/start/date` folder. 
 You can also watch logs with tensorboard:
 ```angular2
 tensorboard --logdir lightning_logs
