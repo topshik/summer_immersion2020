@@ -38,8 +38,8 @@ def validate(model: plmodel.PLSentenceVAE, output_file, n_samples: int = 30) -> 
     for orig, recon in zip(originals_strings, reconstructed_strings):
         output_file.write("Original: " + orig + "\nReconstructed: " + recon + "\n\n")
 
-    # mixture component"
-    if isinstance(model.prior, priors.MoG):
+    # mixture components
+    if isinstance(model.prior, priors.MoG) or isinstance(model.prior, priors.Vamp):
         output_file.write("\n\n----------PSEUDO INPUTS----------\n")
         idx_list = np.random.choice(np.arange(100), size=40)
         for idx in idx_list:
